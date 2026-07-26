@@ -78,6 +78,7 @@ spark35 = "3.5.3"
 kyuubi4spark = "1.11.0"
 kyuubi4authz = "1.10.2"
 trino = '435'
+mongodb = "5.9.1"
 # Trino version the iceberg-rest-trino-it module's in-process query runner is tested against.
 trino-iceberg-it = "478"
 scala-collection-compat = "2.7.0"
@@ -251,6 +252,8 @@ httpclient = { group = "org.apache.httpcomponents", name = "httpclient", version
 httpclient5 = { group = "org.apache.httpcomponents.client5", name = "httpclient5", version.ref = "httpclient5" }
 httpcore5 = { group = "org.apache.httpcomponents.core5", name = "httpcore5", version.ref = "httpcore5" }
 micrometer-core = { group = "io.micrometer", name = "micrometer-core", version.ref = "micrometer-core" }
+mongodb-driver-sync = { group = "org.mongodb", name = "mongodb-driver-sync", version.ref = "mongodb" }
+testcontainers-mongodb = { group = "org.testcontainers", name = "mongodb", version.ref = "testcontainers" }
 
 mockserver-netty = { group = "org.mock-server", name = "mockserver-netty", version.ref = "mockserver" }
 mockserver-client-java = { group = "org.mock-server", name = "mockserver-client-java", version.ref = "mockserver" }
