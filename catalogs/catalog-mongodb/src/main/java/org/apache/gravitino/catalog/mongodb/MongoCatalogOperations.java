@@ -32,12 +32,12 @@ import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
 import org.apache.gravitino.Schema;
 import org.apache.gravitino.SchemaChange;
-import org.apache.gravitino.SupportsSchemas;
 import org.apache.gravitino.catalog.mongodb.converter.MongoSchemaConfig;
 import org.apache.gravitino.catalog.mongodb.converter.MongoSchemaResolver;
 import org.apache.gravitino.connector.CatalogInfo;
 import org.apache.gravitino.connector.CatalogOperations;
 import org.apache.gravitino.connector.HasPropertyMetadata;
+import org.apache.gravitino.connector.SupportsSchemas;
 import org.apache.gravitino.exceptions.NoSuchCatalogException;
 import org.apache.gravitino.exceptions.NoSuchSchemaException;
 import org.apache.gravitino.exceptions.NoSuchTableException;
@@ -118,18 +118,19 @@ public class MongoCatalogOperations implements CatalogOperations, SupportsSchema
   }
 
   @Override
-  public String[] listSchemas() throws NoSuchCatalogException {
-    List<String> databases = Lists.newArrayList();
+  public NameIdentifier[] listSchemas(Namespace namespace) throws NoSuchCatalogException {
+    List<NameIdentifier> databases = Lists.newArrayList();
     for (String name : client.listDatabaseNames()) {
       if (!SYSTEM_DATABASES.contains(name)) {
-        databases.add(name);
+        databases.add(NameIdentifier.of(namespace, name));
       }
     }
-    return databases.toArray(new String[0]);
+    return databases.toArray(new NameIdentifier[0]);
   }
 
   @Override
-  public Schema loadSchema(String schemaName) throws NoSuchSchemaException {
+  public Schema loadSchema(NameIdentifier ident) throws NoSuchSchemaException {
+    String schemaName = ident.name();
     if (!databaseExists(schemaName)) {
       throw new NoSuchSchemaException("MongoDB database %s does not exist", schemaName);
     }
@@ -143,17 +144,17 @@ public class MongoCatalogOperations implements CatalogOperations, SupportsSchema
   }
 
   @Override
-  public Schema createSchema(String schemaName, String comment, Map<String, String> properties) {
+  public Schema createSchema(NameIdentifier ident, String comment, Map<String, String> properties) {
     throw new UnsupportedOperationException(WRITE_UNSUPPORTED);
   }
 
   @Override
-  public Schema alterSchema(String schemaName, SchemaChange... changes) {
+  public Schema alterSchema(NameIdentifier ident, SchemaChange... changes) {
     throw new UnsupportedOperationException(WRITE_UNSUPPORTED);
   }
 
   @Override
-  public boolean dropSchema(String schemaName, boolean cascade) throws NonEmptySchemaException {
+  public boolean dropSchema(NameIdentifier ident, boolean cascade) throws NonEmptySchemaException {
     throw new UnsupportedOperationException(WRITE_UNSUPPORTED);
   }
 

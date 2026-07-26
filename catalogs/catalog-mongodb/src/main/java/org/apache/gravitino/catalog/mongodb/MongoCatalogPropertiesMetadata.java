@@ -22,11 +22,11 @@ import com.google.common.collect.ImmutableMap;
 import java.util.Locale;
 import java.util.Map;
 import org.apache.gravitino.catalog.mongodb.converter.MongoSchemaConfig;
-import org.apache.gravitino.connector.BasePropertiesMetadata;
+import org.apache.gravitino.connector.BaseCatalogPropertiesMetadata;
 import org.apache.gravitino.connector.PropertyEntry;
 
 /** Catalog level properties for the MongoDB catalog. */
-public class MongoCatalogPropertiesMetadata extends BasePropertiesMetadata {
+public class MongoCatalogPropertiesMetadata extends BaseCatalogPropertiesMetadata {
 
   /** Standard MongoDB connection string, normally carrying credentials. */
   public static final String CONNECTION_URI = "mongodb.connection-uri";

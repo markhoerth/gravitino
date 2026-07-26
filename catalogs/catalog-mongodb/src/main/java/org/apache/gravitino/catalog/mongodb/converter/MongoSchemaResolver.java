@@ -25,6 +25,7 @@ import com.mongodb.client.model.Aggregates;
 import com.mongodb.client.model.Filters;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -174,7 +175,11 @@ public final class MongoSchemaResolver {
     Map<String, Column> columns = new LinkedHashMap<>();
     for (String name : fieldOrder) {
       Type type = types.get(name);
-      boolean nullable = occurrences.get(name) < sampled || type instanceof Types.NullType;
+      // Sampling observes presence, never absence: a field seen in every sampled document may
+      // still be missing elsewhere in the collection. Only a validator's required list can
+      // justify NOT NULL, so an inferred column is always nullable. The presence ratio is
+      // reported in the comment instead.
+      boolean nullable = true;
       if (type instanceof Types.NullType) {
         type = Types.StringType.get();
       }
@@ -194,7 +199,13 @@ public final class MongoSchemaResolver {
         id != null
             ? column(ID_FIELD, id.dataType(), id.comment(), false)
             : idColumn(Types.ExternalType.of(MongoTypeConverter.OBJECT_ID_TYPE)));
-    ordered.addAll(columns.values());
+
+    // MongoDB documents carry no column order, and $sample returns a different draw every call,
+    // so first-seen order would reshuffle the schema between loads. Sorting by name after _id
+    // makes repeated loads of the same collection agree.
+    List<Column> rest = new ArrayList<>(columns.values());
+    rest.sort(Comparator.comparing(Column::name));
+    ordered.addAll(rest);
 
     return ordered.toArray(new Column[0]);
   }
