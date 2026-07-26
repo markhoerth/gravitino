@@ -1222,6 +1222,7 @@ tasks {
       ":catalogs:catalog-lakehouse-iceberg:copyLibAndConfig",
       ":catalogs:catalog-lakehouse-paimon:copyLibAndConfig",
       ":catalogs:catalog-model:copyLibAndConfig",
+      ":catalogs:catalog-mongodb:copyLibAndConfig",
       ":catalogs:hive-metastore2-libs:copyLibs",
       ":catalogs:hive-metastore3-libs:copyLibs",
       ":catalogs:catalog-lakehouse-generic:copyLibAndConfig",
