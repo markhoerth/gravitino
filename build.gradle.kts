@@ -1210,6 +1210,7 @@ tasks {
 
   register("copyCatalogLibAndConfigs", Copy::class) {
     dependsOn(
+      ":catalogs:catalog-elasticsearch:copyLibAndConfig",
       ":catalogs:catalog-fileset:copyLibAndConfig",
       ":catalogs:catalog-glue:copyLibAndConfig",
       ":catalogs:catalog-hive:copyLibAndConfig",

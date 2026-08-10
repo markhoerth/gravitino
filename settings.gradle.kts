@@ -46,6 +46,7 @@ include(
 include("catalogs:catalog-fileset")
 include("catalogs:catalog-kafka")
 include("catalogs:catalog-model")
+include("catalogs:catalog-elasticsearch")
 
 include("catalogs-contrib:catalog-jdbc-clickhouse")
 include("catalogs-contrib:catalog-jdbc-hologres")

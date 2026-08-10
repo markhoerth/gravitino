@@ -1,0 +1,15 @@
+{
+  "properties": {
+    "chunk_id": { "type": "keyword" },
+    "chunk_text": { "type": "text" },
+    "embedding": {
+      "type": "dense_vector",
+      "dims": 1024,
+      "index": true,
+      "similarity": "cosine"
+    },
+    "bare_embedding": {
+      "type": "dense_vector"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "properties": {
+    "order_id": { "type": "keyword" },
+    "customer": {
+      "properties": {
+        "id": { "type": "keyword" },
+        "address": {
+          "properties": {
+            "city": { "type": "keyword" },
+            "geo": {
+              "properties": {
+                "lat": { "type": "double" },
+                "lon": { "type": "double" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "opaque": { "type": "object" }
+  }
+}

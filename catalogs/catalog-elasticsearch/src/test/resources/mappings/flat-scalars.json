@@ -1,0 +1,25 @@
+{
+  "properties": {
+    "sku": { "type": "keyword" },
+    "tenant": { "type": "constant_keyword" },
+    "path_glob": { "type": "wildcard" },
+    "body": { "type": "text" },
+    "log_line": { "type": "match_only_text" },
+    "annotated_body": { "type": "annotated_text" },
+    "release": { "type": "version" },
+    "client_ip": { "type": "ip" },
+    "bytes_total": { "type": "long" },
+    "checksum": { "type": "unsigned_long" },
+    "retry_count": { "type": "integer" },
+    "priority": { "type": "short" },
+    "flags": { "type": "byte" },
+    "score": { "type": "double" },
+    "price": { "type": "scaled_float" },
+    "ratio": { "type": "float" },
+    "confidence": { "type": "half_float" },
+    "published": { "type": "boolean" },
+    "created_at": { "type": "date" },
+    "observed_at": { "type": "date_nanos" },
+    "thumbnail": { "type": "binary" }
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "properties": {
+    "location": { "type": "geo_point" },
+    "attributes": { "type": "flattened" },
+    "terms": { "type": "sparse_vector" },
+    "valid_for": { "type": "integer_range" },
+    "warp_signature": { "type": "quantum_entangled_keyword" }
+  }
+}

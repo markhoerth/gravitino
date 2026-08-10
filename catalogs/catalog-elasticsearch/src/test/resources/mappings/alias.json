@@ -1,0 +1,11 @@
+{
+  "properties": {
+    "customer": {
+      "properties": {
+        "id": { "type": "keyword" }
+      }
+    },
+    "customer_id": { "type": "alias", "path": "customer.id" },
+    "dangling_id": { "type": "alias", "path": "nowhere.at.all" }
+  }
+}
