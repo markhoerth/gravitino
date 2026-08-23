@@ -32,6 +32,22 @@ public class GravitinoSparkConfig {
       GRAVITINO_PREFIX + "enablePaimonSupport";
   public static final String GRAVITINO_CLIENT_CONFIG_PREFIX = GRAVITINO_PREFIX + "client.";
 
+  /**
+   * The URI of the Gravitino Iceberg REST catalog service (IRC). When set, every {@code
+   * lakehouse-iceberg} catalog in the application resolves tables through the IRC instead of
+   * opening its own connection to the catalog's metadata backend.
+   *
+   * <p>The IRC runs as a separate auxiliary service on its own port and path, so it cannot be
+   * derived from {@link #GRAVITINO_URI}. This is a deployment-level setting: it is configured once
+   * for the Spark application and is deliberately not expressible per catalog, because the access
+   * path is a property of the deployment rather than of any single catalog.
+   *
+   * <p>This is an override-capable setting. Once the Gravitino server publishes its own IRC
+   * endpoint, that published value becomes the primary source and this property becomes the
+   * override used when the published value is absent or needs to be redirected.
+   */
+  public static final String GRAVITINO_ICEBERG_REST_URI = GRAVITINO_PREFIX + "icebergRestUri";
+
   public static final String GRAVITINO_AUTH_TYPE =
       GRAVITINO_PREFIX + AuthProperties.GRAVITINO_CLIENT_AUTH_TYPE;
   public static final String GRAVITINO_OAUTH2_URI =

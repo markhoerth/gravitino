@@ -148,6 +148,60 @@ Gravitino catalog property names with the prefix `spark.bypass.` are passed to S
 Iceberg catalog property `cache-enabled` is setting to `false` internally and not allowed to change.
 :::
 
+## Routing Iceberg Table Loads Through the Gravitino IRC
+
+By default the catalog's storage backend doubles as the engine's routing instruction: `catalog-backend`
+becomes Iceberg's `type`, so a `catalog-backend=jdbc` catalog produces a Spark Iceberg catalog that
+opens its own JDBC connection to the metadata store and resolves tables there. The Gravitino Iceberg
+REST catalog service (IRC) is never contacted, so there is no `loadTable` response for a per-table
+credential to ride back on, and the connector falls back to a single catalog-scoped credential fetched
+once at initialization. For `credential-providers=s3-token` that catalog-scoped call returns nothing at
+all, because the S3 token generator requires a table path.
+
+Set `spark.sql.gravitino.icebergRestUri` to route table loads through the IRC instead:
+
+```shell
+./bin/spark-sql -v \
+--conf spark.plugins="org.apache.gravitino.spark.connector.plugin.GravitinoSparkPlugin" \
+--conf spark.sql.gravitino.uri=http://127.0.0.1:8090 \
+--conf spark.sql.gravitino.metalake=test \
+--conf spark.sql.gravitino.enableIcebergSupport=true \
+--conf spark.sql.gravitino.icebergRestUri=http://127.0.0.1:9001/iceberg
+```
+
+The IRC scopes each vended token to the table's own location and Iceberg's `RESTSessionCatalog` gives
+each table its own `FileIO`, so credentials become per table rather than per catalog.
+
+Notes on the behaviour:
+
+- **The backend does not decide the route.** Once the property is set, every `lakehouse-iceberg`
+  catalog goes through the IRC regardless of its `catalog-backend`. `catalog-backend` describes where
+  Gravitino stores catalog metadata; it does not select the engine's access path. Backend connection
+  properties (`uri`, `jdbc-user`, `jdbc-password`, `jdbc-driver`, and the Hive metastore URI) are
+  dropped rather than forwarded.
+- **It is a deployment-level setting.** It is configured once for the Spark application and cannot be
+  set per catalog. The URI is separate from `spark.sql.gravitino.uri` because the IRC runs as its own
+  auxiliary service on its own port and path. This property is override-capable: when the Gravitino
+  server learns to publish its own IRC endpoint, the published value becomes the primary source and
+  this property becomes the override.
+- **No catalog-level credential is fetched when routing.** The IRC vends per table; stamping a
+  catalog-level credential in alongside would leave Iceberg holding two sets of storage keys with no
+  defined precedence.
+- **Credential vending is requested automatically** via the
+  `header.X-Iceberg-Access-Delegation: vended-credentials` request header. Iceberg has no dedicated
+  property for this in any supported version, so the connector sets the header passthrough for you.
+- **Authentication** is currently supported for `authType=simple` and `authType=basic`, both passed as
+  an HTTP `Authorization: Basic` header. `oauth2` and `kerberos` mint a credential per request through
+  a token provider, which cannot be expressed as a static Iceberg catalog property; setting
+  `spark.sql.gravitino.icebergRestUri` with those auth types fails with a clear error rather than
+  routing unauthenticated.
+
+:::info
+On Spark 3.3 (Iceberg 1.8.1) vended credentials reach Iceberg through the `LoadTableResponse` config
+map rather than the first-class `credentials` array, which Iceberg 1.8.1 parses but cannot apply. The
+Gravitino IRC emits both forms, so per-table vending works on 3.3, 3.4, and 3.5.
+:::
+
 ## Storage
 
 Spark connector could convert storage properties in the Gravitino catalog to Spark Iceberg connector automatically, No extra configuration is needed for `S3`, `ADLS`, `OSS`, `GCS`.

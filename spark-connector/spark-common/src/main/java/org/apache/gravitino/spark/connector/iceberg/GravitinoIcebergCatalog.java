@@ -19,23 +19,32 @@
 
 package org.apache.gravitino.spark.connector.iceberg;
 
+import com.google.common.annotations.VisibleForTesting;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.Map;
+import java.util.Optional;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.gravitino.auth.AuthProperties;
 import org.apache.gravitino.catalog.lakehouse.iceberg.IcebergConstants;
 import org.apache.gravitino.catalog.lakehouse.iceberg.IcebergPropertiesUtils;
 import org.apache.gravitino.credential.CredentialPropertyUtils;
 import org.apache.gravitino.rel.Table;
+import org.apache.gravitino.spark.connector.GravitinoSparkConfig;
 import org.apache.gravitino.spark.connector.PropertiesConverter;
 import org.apache.gravitino.spark.connector.SparkTransformConverter;
 import org.apache.gravitino.spark.connector.SparkTypeConverter;
 import org.apache.gravitino.spark.connector.catalog.BaseCatalog;
+import org.apache.gravitino.spark.connector.iceberg.IcebergPropertiesConverter.IcebergRestRouting;
 import org.apache.iceberg.catalog.Catalog;
 import org.apache.iceberg.spark.SparkCatalog;
 import org.apache.iceberg.spark.procedures.SparkProcedures;
 import org.apache.iceberg.spark.source.HasIcebergCatalog;
 import org.apache.iceberg.spark.source.SparkTable;
+import org.apache.spark.SparkConf;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.analysis.NoSuchFunctionException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchNamespaceException;
 import org.apache.spark.sql.catalyst.analysis.NoSuchProcedureException;
@@ -61,10 +70,13 @@ public class GravitinoIcebergCatalog extends BaseCatalog
   @Override
   protected TableCatalog createAndInitSparkCatalog(
       String name, CaseInsensitiveStringMap options, Map<String, String> properties) {
+    Optional<IcebergRestRouting> restRouting = resolveRestRouting(name);
     String jdbcDriver = properties.get(IcebergConstants.GRAVITINO_JDBC_DRIVER);
-    if (StringUtils.isNotBlank(jdbcDriver)) {
+    if (!restRouting.isPresent() && StringUtils.isNotBlank(jdbcDriver)) {
       // If `spark.sql.hive.metastore.jars` is set, Spark will use an isolated client class loader
       // to load JDBC drivers, which makes Iceberg could not find corresponding JDBC driver.
+      // Skipped when routing through the IRC: Iceberg opens no JDBC connection then, and the
+      // driver need not be on the Spark classpath at all.
       try {
         Class.forName(jdbcDriver);
       } catch (Exception e) {
@@ -72,13 +84,88 @@ public class GravitinoIcebergCatalog extends BaseCatalog
       }
     }
     String catalogBackendName = IcebergPropertiesUtils.getCatalogBackendName(properties);
+    Map<String, String> all = buildSparkCatalogProperties(options, properties, restRouting);
+    TableCatalog icebergCatalog = new SparkCatalog();
+    icebergCatalog.initialize(catalogBackendName, new CaseInsensitiveStringMap(all));
+    return icebergCatalog;
+  }
+
+  /**
+   * Builds the properties handed to Iceberg's {@code SparkCatalog}.
+   *
+   * <p>When routing through the IRC no catalog-level credential is fetched: the IRC vends per table
+   * on the loadTable response, scoped to that table's location, and stamping a catalog-level
+   * credential in alongside would leave Iceberg holding two sets of keys with no defined
+   * precedence.
+   */
+  @VisibleForTesting
+  Map<String, String> buildSparkCatalogProperties(
+      CaseInsensitiveStringMap options,
+      Map<String, String> properties,
+      Optional<IcebergRestRouting> restRouting) {
+    if (restRouting.isPresent()) {
+      return IcebergPropertiesConverter.restRoutingInstance(restRouting.get())
+          .toSparkCatalogProperties(options, properties);
+    }
     Map<String, String> all =
         getPropertiesConverter().toSparkCatalogProperties(options, properties);
     CredentialPropertyUtils.applyIcebergCredentials(
         CredentialPropertyUtils.getCredentials(gravitinoCatalogClient), all);
-    TableCatalog icebergCatalog = new SparkCatalog();
-    icebergCatalog.initialize(catalogBackendName, new CaseInsensitiveStringMap(all));
-    return icebergCatalog;
+    return all;
+  }
+
+  /**
+   * Resolves deployment-level IRC routing for {@code catalogName}, empty when {@link
+   * GravitinoSparkConfig#GRAVITINO_ICEBERG_REST_URI} is unset.
+   */
+  private Optional<IcebergRestRouting> resolveRestRouting(String catalogName) {
+    SparkConf sparkConf = SparkSession.active().sparkContext().getConf();
+    String restUri = sparkConf.get(GravitinoSparkConfig.GRAVITINO_ICEBERG_REST_URI, null);
+    if (StringUtils.isBlank(restUri)) {
+      return Optional.empty();
+    }
+
+    String authType =
+        sparkConf.get(GravitinoSparkConfig.GRAVITINO_AUTH_TYPE, AuthProperties.SIMPLE_AUTH_TYPE);
+    if (AuthProperties.isSimple(authType)) {
+      // Gravitino's simple auth is a Basic credential over a synthetic password; see
+      // SimpleTokenProvider. Reproduce the header the client would send rather than re-deriving it.
+      String sparkUser = SparkSession.active().sparkContext().sparkUser();
+      return Optional.of(
+          IcebergRestRouting.withAuthorizationHeader(
+              restUri, catalogName, basicAuthorizationHeader(sparkUser, "dummy")));
+    } else if (AuthProperties.isBasic(authType)) {
+      String username = getRequiredConf(sparkConf, GravitinoSparkConfig.GRAVITINO_BASIC_USERNAME);
+      String password = getRequiredConf(sparkConf, GravitinoSparkConfig.GRAVITINO_BASIC_PASSWORD);
+      return Optional.of(
+          IcebergRestRouting.withAuthorizationHeader(
+              restUri, catalogName, basicAuthorizationHeader(username, password)));
+    }
+
+    // oauth2 and kerberos mint a credential per request through a token provider, which cannot be
+    // expressed as a static catalog property. Fail loudly rather than routing unauthenticated.
+    throw new UnsupportedOperationException(
+        String.format(
+            "%s does not support auth type '%s' yet; only '%s' and '%s' can be expressed as "
+                + "Iceberg REST catalog properties",
+            GravitinoSparkConfig.GRAVITINO_ICEBERG_REST_URI,
+            authType,
+            AuthProperties.SIMPLE_AUTH_TYPE,
+            AuthProperties.BASIC_AUTH_TYPE));
+  }
+
+  private static String basicAuthorizationHeader(String username, String password) {
+    String userInformation = username + ":" + password;
+    return "Basic "
+        + Base64.getEncoder().encodeToString(userInformation.getBytes(StandardCharsets.UTF_8));
+  }
+
+  private static String getRequiredConf(SparkConf sparkConf, String key) {
+    String value = sparkConf.get(key, null);
+    if (StringUtils.isBlank(value)) {
+      throw new IllegalArgumentException(key + " should not be empty");
+    }
+    return value;
   }
 
   @Override

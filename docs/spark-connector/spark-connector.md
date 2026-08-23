@@ -33,6 +33,7 @@ The Apache Gravitino Spark connector leverages the Spark DataSourceV2 interface 
 | spark.sql.gravitino.uri                  | string | (none)        | The uri of Gravitino server address.                                                            | Yes      |
 | spark.sql.gravitino.enableIcebergSupport | string | `false`       | Set to `true` to use Iceberg catalog.                                                           | No       |
 | spark.sql.gravitino.enablePaimonSupport  | string | `false`       | Set to `true` to use Paimon catalog.                                                            | No       |
+| spark.sql.gravitino.icebergRestUri       | string | (none)        | The URI of the Gravitino Iceberg REST catalog service. When set, every `lakehouse-iceberg` catalog resolves tables through it. See [Routing Iceberg table loads through the Gravitino IRC](spark-catalog-iceberg.md#routing-iceberg-table-loads-through-the-gravitino-irc). | No       |
 | spark.sql.gravitino.client.              | string | (none)        | The configuration key prefix for the Gravitino client config.                                   | No       |
 
 To configure the Gravitino client, use properties prefixed with `spark.sql.gravitino.client.`. These properties will be passed to the Gravitino client after removing the `spark.sql.` prefix.
