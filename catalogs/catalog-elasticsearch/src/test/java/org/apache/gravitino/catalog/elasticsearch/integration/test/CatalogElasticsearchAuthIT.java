@@ -32,6 +32,7 @@ import java.security.cert.CertPathValidatorException;
 import java.security.cert.CertificateException;
 import java.time.Duration;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.stream.Collectors;
@@ -99,18 +100,30 @@ public class CatalogElasticsearchAuthIT {
   private static final String MAPPING =
       "{\"mappings\":{\"properties\":{\"id\":{\"type\":\"keyword\"}}}}";
 
+  /** Names the generated certificate, and with it the paths certutil writes it to. */
+  private static final String CERT_NAME = "elasticsearch-test";
+
   /**
-   * Generates a self signed certificate for {@code localhost}, then idles long enough to be copied
-   * out of. The image's entrypoint execs any command that is not {@code eswrapper}, so no
-   * entrypoint override is needed.
+   * Generates a self signed certificate, then idles long enough to be copied out of. The image's
+   * entrypoint execs any command that is not {@code eswrapper}, so no entrypoint override is
+   * needed.
+   *
+   * <p>The subject alternative names matter. Testcontainers dials {@code localhost} on a mapped
+   * port, so a certificate without them would fail the handshake on the subject name before the
+   * trust anchor was ever consulted, and {@link #testTlsVerifyRejectsSelfSigned} would pass without
+   * exercising the condition it exists to pin.
    */
   private static final String GENERATE_CERT =
       "set -e; "
-          + "bin/elasticsearch-certutil cert --self-signed --silent --pem --name http "
-          + "--dns localhost --ip 127.0.0.1 --out /tmp/http.zip; "
+          + "bin/elasticsearch-certutil cert --self-signed --silent --pem --name "
+          + CERT_NAME
+          + " --dns localhost --ip 127.0.0.1 --out /tmp/http.zip; "
           + "unzip -o -q /tmp/http.zip -d /tmp/certs; "
           + "echo CERT_READY; "
           + "sleep 300";
+
+  /** Where certutil leaves the PEM pair, named after {@link #CERT_NAME}. */
+  private static final String GENERATED_DIR = "/tmp/certs/" + CERT_NAME + "/" + CERT_NAME;
 
   private static GenericContainer<?> container;
 
@@ -216,6 +229,12 @@ public class CatalogElasticsearchAuthIT {
       UncheckedIOException thrown =
           assertThrows(UncheckedIOException.class, () -> operations.listTables(NAMESPACE));
 
+      assertFalse(
+          isNameMismatch(thrown),
+          "the test certificate is misconfigured, not untrusted: the handshake failed on the "
+              + "subject name, so the trust anchor was never consulted and this test proves "
+              + "nothing about certificate verification. Chain: "
+              + describe(thrown));
       assertTrue(
           isCertificateFailure(thrown),
           "expected a certificate validation failure, got " + describe(thrown));
@@ -307,6 +326,35 @@ public class CatalogElasticsearchAuthIT {
     return false;
   }
 
+  /**
+   * Reports whether the handshake failed because the certificate's subject did not cover the host
+   * that was dialed, rather than because its issuer was untrusted.
+   *
+   * <p>Both conditions surface as the same exception types, so only the message separates them. A
+   * mismatch means the fixture is wrong: the trust check never ran, and a test that accepted it
+   * would be green for the wrong reason.
+   */
+  private static boolean isNameMismatch(Throwable thrown) {
+    for (Throwable cause = thrown; cause != null; cause = cause.getCause()) {
+      String message = cause.getMessage();
+      if (message != null) {
+        String lower = message.toLowerCase(Locale.ROOT);
+        if (lower.contains("no subject alternative")
+            || lower.contains("subject alternative names")
+            || lower.contains("doesn't match")
+            || lower.contains("does not match")
+            || lower.contains("hostname verification")
+            || lower.contains("no name matching")) {
+          return true;
+        }
+      }
+      if (cause.getCause() == cause) {
+        break;
+      }
+    }
+    return false;
+  }
+
   /** Renders a cause chain, so a failed expectation says what actually happened. */
   private static String describe(Throwable thrown) {
     StringBuilder chain = new StringBuilder();
@@ -337,8 +385,8 @@ public class CatalogElasticsearchAuthIT {
       generator.start();
 
       generator.copyFileFromContainer(
-          "/tmp/certs/http/http.crt", certificate.toAbsolutePath().toString());
-      generator.copyFileFromContainer("/tmp/certs/http/http.key", key.toAbsolutePath().toString());
+          GENERATED_DIR + ".crt", certificate.toAbsolutePath().toString());
+      generator.copyFileFromContainer(GENERATED_DIR + ".key", key.toAbsolutePath().toString());
     }
 
     assertTrue(Files.size(certificate) > 0, "the generated certificate is empty");
