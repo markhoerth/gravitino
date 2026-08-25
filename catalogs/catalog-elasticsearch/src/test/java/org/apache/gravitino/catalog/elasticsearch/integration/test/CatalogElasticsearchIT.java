@@ -24,7 +24,9 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.collect.ImmutableMap;
+import java.io.InputStream;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -70,7 +72,10 @@ import org.testcontainers.utility.DockerImageName;
 @EnabledIf("dockerAvailable")
 public class CatalogElasticsearchIT {
 
-  private static final String IMAGE = "docker.elastic.co/elasticsearch/elasticsearch:8.15.0";
+  /** The version under test, overridable so a run can check an older major. */
+  private static final String VERSION = System.getProperty("elasticsearch.test.version", "9.2.4");
+
+  private static final String IMAGE = "docker.elastic.co/elasticsearch/elasticsearch:" + VERSION;
 
   private static final int ES_PORT = 9200;
 
@@ -106,7 +111,18 @@ public class CatalogElasticsearchIT {
           + "\"meta\":{\"comment\":\"fallback key\"}},"
           + "\"documented_vector\":{\"type\":\"dense_vector\",\"dims\":128,"
           + "\"index\":true,\"similarity\":\"dot_product\","
-          + "\"meta\":{\"description\":\"embedding of the title\"}}"
+          + "\"meta\":{\"description\":\"embedding of the title\"}},"
+          // The types the target cluster uses that the branches above do not reach.
+          + "\"summary\":{\"type\":\"match_only_text\"},"
+          + "\"pattern\":{\"type\":\"wildcard\"},"
+          + "\"price\":{\"type\":\"scaled_float\",\"scaling_factor\":100},"
+          + "\"release\":{\"type\":\"version\"},"
+          + "\"suggest\":{\"type\":\"completion\"},"
+          + "\"window\":{\"type\":\"date_range\"},"
+          + "\"attrs\":{\"type\":\"flattened\"},"
+          + "\"ratio\":{\"type\":\"float\"},"
+          + "\"count_i\":{\"type\":\"integer\"},"
+          + "\"code\":{\"type\":\"constant_keyword\",\"value\":\"fixed\"}"
           + "}}}";
 
   private static final Set<String> EXPECTED_COLUMNS =
@@ -130,11 +146,24 @@ public class CatalogElasticsearchIT {
               "title_alias",
               "documented",
               "documented_alt",
-              "documented_vector"));
+              "documented_vector",
+              "summary",
+              "pattern",
+              "price",
+              "release",
+              "suggest",
+              "window",
+              "attrs",
+              "ratio",
+              "count_i",
+              "code"));
 
   private static GenericContainer<?> container;
 
   private static ElasticsearchCatalogOperations operations;
+
+  /** The version the container reported, read back from the cluster rather than from the tag. */
+  private static String clusterVersion;
 
   /**
    * Guards the whole class, so a machine without a reachable Docker daemon skips rather than fails.
@@ -258,6 +287,58 @@ public class CatalogElasticsearchIT {
   }
 
   /**
+   * The field types the target cluster actually mapped, read back from a cluster of the version it
+   * runs. Each is compared against the converter's own rule for that mapping type.
+   *
+   * <p>The external type assertions are the point of this test. {@code flattened}, {@code
+   * completion} and {@code date_range} have no case in the converter, and the contract is that such
+   * a type degrades to a non projectable {@link Types.ExternalType} carrying its own name. A future
+   * converter change that turned an unrecognized type into an exception would take out the whole
+   * table rather than one column, so the fallback is pinned here explicitly.
+   */
+  @Test
+  public void testDellObservedTypes() {
+    Map<String, Column> columns = columns();
+
+    assertEquals(scalar("match_only_text"), columns.get("summary").dataType());
+    assertEquals(scalar("wildcard"), columns.get("pattern").dataType());
+    assertEquals(scalar("scaled_float"), columns.get("price").dataType());
+    assertEquals(scalar("version"), columns.get("release").dataType());
+    assertEquals(scalar("float"), columns.get("ratio").dataType());
+    assertEquals(scalar("integer"), columns.get("count_i").dataType());
+    assertEquals(scalar("constant_keyword"), columns.get("code").dataType());
+
+    assertEquals(scalar("completion"), columns.get("suggest").dataType());
+    assertEquals(scalar("date_range"), columns.get("window").dataType());
+    assertEquals(scalar("flattened"), columns.get("attrs").dataType());
+  }
+
+  /**
+   * A mapping type the converter has no case for degrades to a non projectable {@link
+   * Types.ExternalType} carrying its own name, rather than throwing.
+   *
+   * <p>This is the assertion that matters most in this class. {@code flattened}, {@code completion}
+   * and {@code date_range} are all mapped in the target cluster and none has a converter case, so
+   * an unrecognized type that threw would take out every column of the index rather than leave one
+   * unreadable. The expectations are spelled out here instead of being read back from the
+   * converter, so a change there has to fail this test rather than move with it.
+   */
+  @Test
+  public void testUnrecognizedTypesDegradeToExternal() {
+    Map<String, Column> columns = columns();
+
+    assertEquals(Types.ExternalType.of("flattened"), columns.get("attrs").dataType());
+    assertEquals(Types.ExternalType.of("completion"), columns.get("suggest").dataType());
+    assertEquals(Types.ExternalType.of("date_range"), columns.get("window").dataType());
+  }
+
+  /** The container really is the version the test asked for. */
+  @Test
+  public void testClusterVersion() {
+    assertEquals(VERSION, clusterVersion, "container did not run the requested version");
+  }
+
+  /**
    * An object with no usable shape is an external type, not an empty struct. The two spellings are
    * written differently but the cluster normalizes both to a bare {@code {"type": "object"}}, so
    * the parser never sees the empty {@code properties} the fixture declared.
@@ -358,11 +439,21 @@ public class CatalogElasticsearchIT {
    */
   private static void createFixtureIndex(String uri) throws Exception {
     try (RestClient client = RestClient.builder(HttpHost.create(uri)).build()) {
+      clusterVersion = clusterVersion(client);
+
       Request request = new Request("PUT", "/" + INDEX);
       request.setJsonEntity(MAPPING);
 
       Response response = client.performRequest(request);
       assertEquals(200, response.getStatusLine().getStatusCode());
+    }
+  }
+
+  /** Reads {@code version.number} from the cluster root. */
+  private static String clusterVersion(RestClient client) throws Exception {
+    Response response = client.performRequest(new Request("GET", "/"));
+    try (InputStream body = response.getEntity().getContent()) {
+      return new ObjectMapper().readTree(body).get("version").get("number").asText();
     }
   }
 }
