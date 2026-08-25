@@ -40,6 +40,7 @@ dependencies {
 
   testImplementation(libs.commons.lang3)
   testImplementation(libs.junit.jupiter.api)
+  testImplementation(libs.testcontainers)
 
   testRuntimeOnly(libs.junit.jupiter.engine)
 }
