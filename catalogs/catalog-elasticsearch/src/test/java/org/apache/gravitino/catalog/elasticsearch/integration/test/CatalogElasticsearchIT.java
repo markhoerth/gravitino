@@ -19,6 +19,7 @@
 package org.apache.gravitino.catalog.elasticsearch.integration.test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -98,7 +99,14 @@ public class CatalogElasticsearchIT {
           + "{\"sku\":{\"type\":\"keyword\"},\"qty\":{\"type\":\"integer\"}}},"
           + "\"addr\":{\"type\":\"object\",\"properties\":"
           + "{\"city\":{\"type\":\"keyword\"},\"zip\":{\"type\":\"keyword\"}}},"
-          + "\"title_alias\":{\"type\":\"alias\",\"path\":\"title\"}"
+          + "\"title_alias\":{\"type\":\"alias\",\"path\":\"title\"},"
+          + "\"documented\":{\"type\":\"keyword\","
+          + "\"meta\":{\"description\":\"customer identifier\"}},"
+          + "\"documented_alt\":{\"type\":\"keyword\","
+          + "\"meta\":{\"comment\":\"fallback key\"}},"
+          + "\"documented_vector\":{\"type\":\"dense_vector\",\"dims\":128,"
+          + "\"index\":true,\"similarity\":\"dot_product\","
+          + "\"meta\":{\"description\":\"embedding of the title\"}}"
           + "}}}";
 
   private static final Set<String> EXPECTED_COLUMNS =
@@ -119,7 +127,10 @@ public class CatalogElasticsearchIT {
               "empty_props",
               "nested_items",
               "addr",
-              "title_alias"));
+              "title_alias",
+              "documented",
+              "documented_alt",
+              "documented_vector"));
 
   private static GenericContainer<?> container;
 
@@ -268,14 +279,54 @@ public class CatalogElasticsearchIT {
   }
 
   /**
-   * {@code ElasticsearchMappingParser} builds the comment from the mapping's {@code type} key and
-   * its siblings, never from {@code meta.description}, so {@code id} reports its mapping type.
+   * A field with no {@code meta} block keeps the comment synthesized from its mapping. {@code id}
+   * cannot stand for this case: the fixture has always given it a {@code meta.description}, which
+   * is exactly what the parser now reports, so an undescribed field carries the fallback instead.
    */
   @Test
-  public void testColumnComment() {
-    Column id = columns().get("id");
-    assertNotNull(id.comment(), "id carries no comment");
-    assertEquals("elasticsearch type: keyword", id.comment());
+  public void testUndocumentedColumnComment() {
+    Column title = columns().get("title");
+    assertNotNull(title.comment(), "title carries no comment");
+    assertEquals("elasticsearch type: text", title.comment());
+
+    assertEquals(
+        "elasticsearch type: text; alias for: title", columns().get("title_alias").comment());
+  }
+
+  /** The description the fixture has always carried on {@code id} now reaches the column. */
+  @Test
+  public void testDescribedColumnCommentOnId() {
+    assertEquals("primary id", columns().get("id").comment());
+  }
+
+  /** {@code meta.description} becomes the comment outright, with no mapping type left in it. */
+  @Test
+  public void testColumnCommentFromDescription() {
+    String comment = columns().get("documented").comment();
+
+    assertEquals("customer identifier", comment);
+    assertFalse(comment.contains("keyword"), "the mapping type leaked into " + comment);
+    assertFalse(comment.contains("elasticsearch type"), "the synthesized prefix survived");
+  }
+
+  /** {@code meta.comment} is read when the field carries no {@code meta.description}. */
+  @Test
+  public void testColumnCommentFromCommentKey() {
+    assertEquals("fallback key", columns().get("documented_alt").comment());
+  }
+
+  /**
+   * A described vector keeps the attributes its Gravitino type cannot carry: {@code list<float>}
+   * says nothing about how long the vector is or how it is compared.
+   */
+  @Test
+  public void testColumnCommentKeepsVectorAttributes() {
+    String comment = columns().get("documented_vector").comment();
+
+    assertTrue(
+        comment.startsWith("embedding of the title ("), "unexpected comment shape: " + comment);
+    assertTrue(comment.contains("128"), "dims missing from " + comment);
+    assertTrue(comment.contains("dot_product"), "similarity missing from " + comment);
   }
 
   /** Loading an index that does not exist is a missing table, not a transport failure. */

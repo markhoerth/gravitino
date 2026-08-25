@@ -52,6 +52,9 @@ public final class ElasticsearchMappingParser {
   private static final String DIMS = "dims";
   private static final String SIMILARITY = "similarity";
   private static final String INDEX = "index";
+  private static final String META = "meta";
+  private static final String DESCRIPTION = "description";
+  private static final String COMMENT = "comment";
 
   /** Mapping type reported for a node that declares neither a type nor any properties. */
   private static final String UNKNOWN_TYPE = "unknown";
@@ -190,12 +193,51 @@ public final class ElasticsearchMappingParser {
   }
 
   /**
-   * Builds the column comment, semicolon separated, omitting whatever the mapping does not declare.
+   * Builds the column comment, preferring a description the mapping author wrote over one
+   * synthesized from the mapping itself.
+   *
+   * <p>A synthesized comment restates the type column and little else, so an author supplied
+   * description replaces it outright. Only the attributes the Gravitino type cannot carry are kept,
+   * in parentheses, for example {@code embedding of the title (dims: 1024; similarity: cosine)}.
+   */
+  private static String comment(String esType, JsonNode node, String aliasPath) {
+    String described = description(node);
+    if (described == null) {
+      return synthesized(esType, node, aliasPath);
+    }
+
+    String retained = retained(esType, node, aliasPath);
+    return retained.isEmpty() ? described : described + " (" + retained + ")";
+  }
+
+  /**
+   * Reads the author's own description of the field, taken from {@code meta.description} and
+   * falling back to {@code meta.comment}.
+   *
+   * <p>Elasticsearch constrains {@code meta} to an object of string values, but a mapping can reach
+   * this catalog from anywhere, so anything else is treated as no description at all rather than as
+   * an error.
+   *
+   * @return the description, or null when the field carries none
+   */
+  private static String description(JsonNode node) {
+    JsonNode meta = node == null ? null : node.get(META);
+    if (meta == null || !meta.isObject()) {
+      return null;
+    }
+
+    String description = nonBlank(text(meta, DESCRIPTION));
+    return description != null ? description : nonBlank(text(meta, COMMENT));
+  }
+
+  /**
+   * Describes the field from the mapping alone, semicolon separated, omitting whatever the mapping
+   * does not declare.
    *
    * <p>For example {@code elasticsearch type: dense_vector; dims: 1024; similarity: cosine; index:
    * true}.
    */
-  private static String comment(String esType, JsonNode node, String aliasPath) {
+  private static String synthesized(String esType, JsonNode node, String aliasPath) {
     StringBuilder comment = new StringBuilder("elasticsearch type: ").append(esType);
 
     append(comment, DIMS, text(node, DIMS));
@@ -205,6 +247,26 @@ public final class ElasticsearchMappingParser {
     append(comment, "alias for", aliasPath);
 
     return comment.toString();
+  }
+
+  /**
+   * Renders the attributes worth keeping alongside an author's description: the shape of a vector,
+   * the multi-fields a query can reach, and the path an alias stands for. Everything else the
+   * synthesized string reports is already visible as the column's type.
+   *
+   * @return the attributes, semicolon separated, or an empty string when there are none
+   */
+  private static String retained(String esType, JsonNode node, String aliasPath) {
+    StringBuilder attributes = new StringBuilder();
+
+    if (ElasticsearchTypeConverter.DENSE_VECTOR.equals(esType)) {
+      append(attributes, DIMS, text(node, DIMS));
+      append(attributes, SIMILARITY, text(node, SIMILARITY));
+    }
+    append(attributes, "multi-fields", multiFields(node));
+    append(attributes, "alias for", aliasPath);
+
+    return attributes.toString();
   }
 
   /** Renders multi-fields as {@code raw (keyword), english (text)}, or null when there are none. */
@@ -231,9 +293,23 @@ public final class ElasticsearchMappingParser {
   }
 
   private static void append(StringBuilder comment, String label, String value) {
-    if (value != null && !value.isEmpty()) {
-      comment.append("; ").append(label).append(": ").append(value);
+    if (value == null || value.isEmpty()) {
+      return;
     }
+
+    if (comment.length() > 0) {
+      comment.append("; ");
+    }
+    comment.append(label).append(": ").append(value);
+  }
+
+  /** Treats a blank string as absent, so an empty description does not shadow the fallback. */
+  private static String nonBlank(String value) {
+    if (value == null) {
+      return null;
+    }
+    String trimmed = value.trim();
+    return trimmed.isEmpty() ? null : trimmed;
   }
 
   /**
