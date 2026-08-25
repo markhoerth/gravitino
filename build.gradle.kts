@@ -220,6 +220,14 @@ allprojects {
       val icebergVersion: String = libs.versions.iceberg.get()
       param.systemProperty("ICEBERG_VERSION", icebergVersion)
 
+      // Forward the Elasticsearch container version to the forked test workers. A -D on the
+      // Gradle command line reaches the daemon only, so without this the catalog-elasticsearch
+      // integration tests silently keep running their own default.
+      param.systemProperty(
+        "elasticsearch.test.version",
+        System.getProperty("elasticsearch.test.version") ?: "9.2.4"
+      )
+
       // Change poll image pause time from 30s to 60s
       param.environment("TESTCONTAINERS_PULL_PAUSE_TIMEOUT", "60")
       val jdbcDatabase = project.properties["jdbcBackend"] as? String ?: "h2"

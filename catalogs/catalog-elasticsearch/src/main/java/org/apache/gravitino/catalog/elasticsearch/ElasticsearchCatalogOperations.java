@@ -187,7 +187,7 @@ public class ElasticsearchCatalogOperations
     try {
       rows = client.catIndices();
     } catch (IOException e) {
-      throw new UncheckedIOException("Failed to list Elasticsearch indices", e);
+      throw wrap("Failed to list Elasticsearch indices", e);
     }
 
     List<NameIdentifier> tables = Lists.newArrayListWithExpectedSize(rows.size());
@@ -219,9 +219,9 @@ public class ElasticsearchCatalogOperations
       if (e.getResponse().getStatusLine().getStatusCode() == 404) {
         throw new NoSuchTableException(e, "Elasticsearch index %s does not exist", index);
       }
-      throw new UncheckedIOException("Failed to read Elasticsearch index " + index, e);
+      throw wrap("Failed to read Elasticsearch index " + index, e);
     } catch (IOException e) {
-      throw new UncheckedIOException("Failed to read Elasticsearch index " + index, e);
+      throw wrap("Failed to read Elasticsearch index " + index, e);
     }
 
     List<Column> columns = ElasticsearchMappingParser.parseColumns(mappings);
@@ -327,6 +327,20 @@ public class ElasticsearchCatalogOperations
     put(stats, ElasticsearchTablePropertiesMetadata.DOCS_COUNT, text(row, CAT_DOCS_COUNT));
     put(stats, ElasticsearchTablePropertiesMetadata.STORE_SIZE, text(row, CAT_STORE_SIZE));
     return stats.build();
+  }
+
+  /**
+   * Wraps a transport failure, carrying the cluster's own reason into the message rather than
+   * leaving it on the cause alone.
+   *
+   * <p>An operator reading only the top level message would otherwise see a fixed string, which
+   * cannot distinguish an absent credential from a rejected one, or either from an unreachable
+   * host. The cause stays attached for anyone reading the whole trace.
+   */
+  private static UncheckedIOException wrap(String message, IOException cause) {
+    String reason = cause.getMessage();
+    return new UncheckedIOException(
+        reason == null || reason.isEmpty() ? message : message + ": " + reason, cause);
   }
 
   private static void put(
