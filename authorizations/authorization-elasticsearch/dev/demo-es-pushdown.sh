@@ -42,6 +42,7 @@ GRAVITINO_URL="${GRAVITINO_URL:-http://localhost:8090}"
 
 METALAKE="demo"
 CATALOG="search"
+SCHEMA="default"
 INDEX_PREFIX="demo_"
 ANALYST="ANALYST"
 ADMIN_USER="mhoerth"
@@ -71,23 +72,28 @@ es() {
 }
 
 grav() {
-  local method=$1 path=$2 body=${3:-}
+  local method=$1 path=$2 body=${3:-} out
   if [[ -n "$body" ]]; then
-    curl -s -X "$method" -H 'Content-Type: application/json' -H 'Accept: application/vnd.gravitino.v1+json' \
-      -d "$body" "$GRAVITINO_URL$path"
+    out=$(curl -s -X "$method" -H 'Content-Type: application/json' -H 'Accept: application/vnd.gravitino.v1+json' \
+      -d "$body" "$GRAVITINO_URL$path")
   else
-    curl -s -X "$method" -H 'Accept: application/vnd.gravitino.v1+json' "$GRAVITINO_URL$path"
+    out=$(curl -s -X "$method" -H 'Accept: application/vnd.gravitino.v1+json' "$GRAVITINO_URL$path")
   fi
+  if printf '%s' "$out" | grep -q '"code" *: *[1-9]'; then
+    printf '\033[31mREQUEST FAILED  %s %s\033[0m\n' "$method" "$path" >&2
+  fi
+  printf '%s' "$out"
 }
 
 pretty() {
   if command -v jq >/dev/null 2>&1; then jq .; else cat; fi
 }
 
-es_role_name() { printf 'gravitino_%s_%s' "$METALAKE" "$1"; }
+es_role_name() { printf 'gravitino_%s_%s' "${METALAKE,,}" "${1,,}"; }
 
 show_es_role() {
   local role
+  sleep "${SETTLE:-2}"
   role="$(es_role_name "$1")"
   printf '%sGET %s/_security/role/%s%s\n' "$DIM" "$ES_URL" "$role" "$RESET"
   es GET "/_security/role/$role" | pretty
@@ -95,6 +101,7 @@ show_es_role() {
 
 show_es_mapping() {
   local mapping
+  sleep "${SETTLE:-2}"
   mapping="$(es_role_name "$1")__mapping"
   printf '%sGET %s/_security/role_mapping/%s%s\n' "$DIM" "$ES_URL" "$mapping" "$RESET"
   es GET "/_security/role_mapping/$mapping" | pretty
@@ -126,7 +133,6 @@ setup() {
   banner "Building the distribution"
   note "This takes a few minutes the first time."
   (cd "$REPO_ROOT" && ./gradlew compileDistribution -x test)
-  (cd "$REPO_ROOT" && ./gradlew :authorizations:authorization-elasticsearch:copyLibAndConfig)
   if [[ ! -f "$PACKAGE_DIR/authorizations/elasticsearch/libs/gravitino-authorization-elasticsearch"*.jar ]]; then
     ls "$PACKAGE_DIR/authorizations/elasticsearch/libs" >/dev/null 2>&1 || {
       echo "The plugin jars are not staged under $PACKAGE_DIR/authorizations/elasticsearch/libs" >&2
@@ -156,10 +162,13 @@ setup() {
   catalog_body=$(cat <<JSON
 {
   "name": "$CATALOG",
-  "type": "MODEL",
-  "provider": "model",
-  "comment": "Governs the Elasticsearch cluster",
+  "type": "RELATIONAL",
+  "provider": "elasticsearch",
+  "comment": "Federates and governs the Elasticsearch cluster",
   "properties": {
+    "elasticsearch.hosts": "$ES_URL",
+    "elasticsearch.username": "$ES_USER",
+    "elasticsearch.password": "$ES_PASSWORD",
     "authorization-provider": "elasticsearch",
     "authorization.elasticsearch.url": "$ES_URL",
     "authorization.elasticsearch.auth.type": "basic",
@@ -191,10 +200,22 @@ JSON
 # ---------------------------------------------------------------------------- demo
 
 demo() {
-  banner "STEP 1  Elasticsearch has no Gravitino roles yet"
+  # Start from a clean slate so the demo can be run repeatedly.
+  curl -s -X DELETE -H 'Accept: application/vnd.gravitino.v1+json' \
+    "$GRAVITINO_URL/api/metalakes/$METALAKE/roles/$ANALYST" >/dev/null 2>&1 || true
+  es DELETE "/_security/role/$(es_role_name "$ANALYST")" >/dev/null 2>&1 || true
+  es DELETE "/_security/role_mapping/$(es_role_name "$ANALYST")__mapping" >/dev/null 2>&1 || true
+  sleep 1
+
+  banner "STEP 1  The catalog already federates the cluster"
+  printf '%sGET %s/api/metalakes/%s/catalogs/%s/schemas/%s/tables%s\n' \
+    "$DIM" "$GRAVITINO_URL" "$METALAKE" "$CATALOG" "$SCHEMA" "$RESET"
+  grav GET "/api/metalakes/$METALAKE/catalogs/$CATALOG/schemas/$SCHEMA/tables" | pretty
+  note "Every index is a table. That is the connector you already have."
+  echo
   printf '%sGET %s/_security/role/gravitino_*%s\n' "$DIM" "$ES_URL" "$RESET"
   es GET "/_security/role/gravitino_*" | pretty
-  note "An empty object. Nothing has been pushed."
+  note "Elasticsearch has no Gravitino roles yet. Nothing has been pushed."
   pause
 
   banner "STEP 2  Create a read privilege through the Gravitino REST API"
@@ -237,19 +258,32 @@ JSON
   note "Elasticsearch stores no users: the groups rule is matched against the caller's token."
   pause
 
-  banner "STEP 5  Add a write privilege to the same role through Gravitino"
+  banner "STEP 5  Deny one index through Gravitino"
+  printf '%sPUT %s/api/metalakes/%s/permissions/roles/%s/table/%s/grant%s\n' \
+    "$DIM" "$GRAVITINO_URL" "$METALAKE" "$ANALYST" "$CATALOG.$SCHEMA.${INDEX_PREFIX}pii" "$RESET"
+  grav PUT "/api/metalakes/$METALAKE/permissions/roles/$ANALYST/table/$CATALOG.$SCHEMA.${INDEX_PREFIX}pii/grant" \
+    '{"privileges":[{"name":"SELECT_TABLE","condition":"DENY"}]}' | pretty
+  pause
+
+  banner "STEP 6  See the deny in Elasticsearch"
+  show_es_role "$ANALYST"
+  note "Elasticsearch roles are additive and cannot subtract from a pattern, so Gravitino"
+  note "replaced ${INDEX_PREFIX}* with the indices that remain allowed. ${INDEX_PREFIX}pii is gone."
+  pause
+
+  banner "STEP 7  Add a write privilege to the same role through Gravitino"
   printf '%sPUT %s/api/metalakes/%s/permissions/roles/%s/catalog/%s/grant%s\n' \
     "$DIM" "$GRAVITINO_URL" "$METALAKE" "$ANALYST" "$CATALOG" "$RESET"
   grav PUT "/api/metalakes/$METALAKE/permissions/roles/$ANALYST/catalog/$CATALOG/grant" \
     '{"privileges":[{"name":"MODIFY_TABLE","condition":"ALLOW"}]}' | pretty
   pause
 
-  banner "STEP 6  See the privilege change in Elasticsearch"
+  banner "STEP 8  See the privilege change in Elasticsearch"
   show_es_role "$ANALYST"
   note "The same role now carries write as well. No Gravitino restart, no engine involved."
   pause
 
-  banner "STEP 7  Revoke the privilege through Gravitino"
+  banner "STEP 9  Revoke the privilege through Gravitino"
   grav PUT "/api/metalakes/$METALAKE/permissions/roles/$ANALYST/catalog/$CATALOG/revoke" \
     '{"privileges":[{"name":"MODIFY_TABLE","condition":"ALLOW"}]}' >/dev/null
   ok "revoked MODIFY_TABLE"
@@ -258,7 +292,7 @@ JSON
   note "Back to read only."
   pause
 
-  banner "STEP 8  Revoke the role from the user through Gravitino"
+  banner "STEP 10  Revoke the role from the user through Gravitino"
   grav PUT "/api/metalakes/$METALAKE/permissions/users/$ADMIN_USER/revoke" \
     "{\"roleNames\":[\"$ANALYST\"]}" >/dev/null
   ok "revoked from $ADMIN_USER"

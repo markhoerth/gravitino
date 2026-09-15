@@ -24,6 +24,8 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.annotations.VisibleForTesting;
 import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -33,6 +35,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import org.apache.gravitino.Audit;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.annotation.Unstable;
 import org.apache.gravitino.authorization.Group;
@@ -40,6 +43,7 @@ import org.apache.gravitino.authorization.MetadataObjectChange;
 import org.apache.gravitino.authorization.Owner;
 import org.apache.gravitino.authorization.Role;
 import org.apache.gravitino.authorization.RoleChange;
+import org.apache.gravitino.authorization.SecurableObject;
 import org.apache.gravitino.authorization.User;
 import org.apache.gravitino.connector.authorization.AuthorizationPlugin;
 import org.apache.gravitino.exceptions.AuthorizationPluginException;
@@ -144,20 +148,77 @@ public class ElasticsearchAuthorizationPlugin implements AuthorizationPlugin {
   @Override
   public Boolean onRoleUpdated(Role role, RoleChange... changes)
       throws AuthorizationPluginException {
-    // Every change kind alters which securable objects the role carries, and the role passed in
-    // already reflects them, so the role descriptor is rebuilt from the role as a whole. Writing
-    // the whole descriptor is also what keeps this operation idempotent.
+    // The role carries its state before the change, so the changes have to be applied here to
+    // arrive at the securable objects the role now holds. Rebuilding the whole descriptor from
+    // that effective state is what keeps this operation idempotent.
+    List<SecurableObject> objects =
+        new ArrayList<>(
+            role.securableObjects() == null ? Collections.emptyList() : role.securableObjects());
+
     for (RoleChange change : changes) {
-      if (!(change instanceof RoleChange.AddSecurableObject)
-          && !(change instanceof RoleChange.RemoveSecurableObject)
-          && !(change instanceof RoleChange.UpdateSecurableObject)) {
+      if (change instanceof RoleChange.AddSecurableObject) {
+        replaceObject(objects, ((RoleChange.AddSecurableObject) change).getSecurableObject());
+      } else if (change instanceof RoleChange.RemoveSecurableObject) {
+        removeObject(objects, ((RoleChange.RemoveSecurableObject) change).getSecurableObject());
+      } else if (change instanceof RoleChange.UpdateSecurableObject) {
+        RoleChange.UpdateSecurableObject update = (RoleChange.UpdateSecurableObject) change;
+        removeObject(objects, update.getSecurableObject());
+        replaceObject(objects, update.getNewSecurableObject());
+      } else {
         throw new IllegalArgumentException(
             String.format("RoleChange is not supported - %s", change));
       }
     }
-    applyRole(role);
-    invalidateKeysOfPrincipalsHolding(role);
+
+    Role effective = new EffectiveRole(role, objects);
+    applyRole(effective);
+    invalidateKeysOfPrincipalsHolding(effective);
     return true;
+  }
+
+  /** Adds a securable object, replacing any existing entry for the same object. */
+  private static void replaceObject(List<SecurableObject> objects, SecurableObject object) {
+    removeObject(objects, object);
+    objects.add(object);
+  }
+
+  /** Removes the entry for a securable object, matching on type and full name. */
+  private static void removeObject(List<SecurableObject> objects, SecurableObject object) {
+    objects.removeIf(
+        existing ->
+            existing.type() == object.type() && existing.fullName().equals(object.fullName()));
+  }
+
+  /** A role carrying the securable objects it holds after a set of changes has been applied. */
+  private static class EffectiveRole implements Role {
+
+    private final Role delegate;
+    private final List<SecurableObject> objects;
+
+    EffectiveRole(Role delegate, List<SecurableObject> objects) {
+      this.delegate = delegate;
+      this.objects = objects;
+    }
+
+    @Override
+    public String name() {
+      return delegate.name();
+    }
+
+    @Override
+    public Map<String, String> properties() {
+      return delegate.properties();
+    }
+
+    @Override
+    public List<SecurableObject> securableObjects() {
+      return objects;
+    }
+
+    @Override
+    public Audit auditInfo() {
+      return delegate.auditInfo();
+    }
   }
 
   // Grants
