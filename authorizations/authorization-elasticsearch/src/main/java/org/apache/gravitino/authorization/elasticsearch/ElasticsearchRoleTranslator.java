@@ -72,6 +72,7 @@ public class ElasticsearchRoleTranslator {
 
   private final String indexPrefix;
   private final Supplier<List<String>> indexLister;
+  private final boolean requireUsagePrivileges;
 
   /**
    * Creates a translator.
@@ -80,8 +81,56 @@ public class ElasticsearchRoleTranslator {
    * @param indexLister supplies the concrete index names, used to expand a deny into an allow list.
    */
   public ElasticsearchRoleTranslator(String indexPrefix, Supplier<List<String>> indexLister) {
+    this(indexPrefix, indexLister, true);
+  }
+
+  /**
+   * Creates a translator.
+   *
+   * @param indexPrefix the prefix scoping catalog and schema level grants.
+   * @param indexLister supplies the concrete index names, used to expand a deny into an allow list.
+   * @param requireUsagePrivileges whether data privileges require USE_CATALOG and USE_SCHEMA in the
+   *     same role, matching how Gravitino gates access to a table.
+   */
+  public ElasticsearchRoleTranslator(
+      String indexPrefix, Supplier<List<String>> indexLister, boolean requireUsagePrivileges) {
     this.indexPrefix = indexPrefix == null ? "" : indexPrefix;
     this.indexLister = indexLister;
+    this.requireUsagePrivileges = requireUsagePrivileges;
+  }
+
+  /**
+   * Returns whether a role carries the usage privileges that Gravitino requires before a data
+   * privilege grants anything.
+   *
+   * <p>Gravitino's table expression reads {@code ANY_USE_CATALOG && ANY_USE_SCHEMA &&
+   * (ANY_SELECT_TABLE || ...)}, where USE_CATALOG counts at metalake or catalog level and
+   * USE_SCHEMA at metalake, catalog or schema level. A role holding only SELECT_TABLE therefore
+   * grants nothing in Gravitino, and must grant nothing in Elasticsearch either.
+   */
+  private boolean hasUsagePrivileges(Role role) {
+    boolean useCatalog = false;
+    boolean useSchema = false;
+
+    for (SecurableObject object : nullSafe(role.securableObjects())) {
+      MetadataObject.Type type = object.type();
+      for (Privilege privilege : nullSafe(object.privileges())) {
+        if (privilege.condition() == Privilege.Condition.DENY) {
+          continue;
+        }
+        if (privilege.name() == Privilege.Name.USE_CATALOG
+            && (type == MetadataObject.Type.METALAKE || type == MetadataObject.Type.CATALOG)) {
+          useCatalog = true;
+        }
+        if (privilege.name() == Privilege.Name.USE_SCHEMA
+            && (type == MetadataObject.Type.METALAKE
+                || type == MetadataObject.Type.CATALOG
+                || type == MetadataObject.Type.SCHEMA)) {
+          useSchema = true;
+        }
+      }
+    }
+    return useCatalog && useSchema;
   }
 
   /**
@@ -94,6 +143,7 @@ public class ElasticsearchRoleTranslator {
   public ObjectNode translate(Role role, String metalake) {
     Map<String, Set<String>> allowed = new LinkedHashMap<>();
     Map<String, Set<String>> denied = new LinkedHashMap<>();
+    boolean usageSatisfied = !requireUsagePrivileges || hasUsagePrivileges(role);
 
     for (SecurableObject object : nullSafe(role.securableObjects())) {
       String pattern = indexPattern(object);
@@ -101,6 +151,17 @@ public class ElasticsearchRoleTranslator {
         continue;
       }
       for (Privilege privilege : nullSafe(object.privileges())) {
+        if (!usageSatisfied
+            && privilege.condition() != Privilege.Condition.DENY
+            && ElasticsearchPrivileges.requiresUsage(privilege.name())) {
+          LOG.warn(
+              "Role {} carries {} on {} without USE_CATALOG and USE_SCHEMA. Gravitino refuses "
+                  + "access in that case, so the privilege is not pushed to Elasticsearch.",
+              role.name(),
+              privilege.name(),
+              object.fullName());
+          continue;
+        }
         Set<String> esPrivileges = ElasticsearchPrivileges.indexPrivileges(privilege.name());
         if (esPrivileges.isEmpty()) {
           LOG.debug(

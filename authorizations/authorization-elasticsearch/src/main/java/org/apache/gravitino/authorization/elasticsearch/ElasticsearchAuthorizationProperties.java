@@ -95,6 +95,15 @@ public class ElasticsearchAuthorizationProperties extends AuthorizationPropertie
   public static final String TLS_INSECURE = "authorization.elasticsearch.tls.insecure";
 
   /**
+   * Require a role to carry USE_CATALOG and USE_SCHEMA before its data privileges are pushed.
+   * Gravitino gates table access on those usage privileges as well as the data privilege itself, so
+   * a role holding only SELECT_TABLE is refused by Gravitino. Without this, such a role would be
+   * honoured by Elasticsearch, which is more permissive than Gravitino.
+   */
+  public static final String REQUIRE_USAGE_PRIVILEGES =
+      "authorization.elasticsearch.require-usage-privileges";
+
+  /**
    * Bind the Elasticsearch role to a native (local realm) user of the same name when one exists.
    * Role mappings only apply to external realms, so without this a grant to a native user writes a
    * mapping that is never consulted. Native users are never created by the plugin: when no user of
@@ -253,6 +262,15 @@ public class ElasticsearchAuthorizationProperties extends AuthorizationPropertie
    */
   public boolean tlsInsecure() {
     return Boolean.parseBoolean(properties.getOrDefault(TLS_INSECURE, "false"));
+  }
+
+  /**
+   * Returns whether data privileges require the usage privileges alongside them.
+   *
+   * @return true when USE_CATALOG and USE_SCHEMA are required, the default.
+   */
+  public boolean requireUsagePrivileges() {
+    return Boolean.parseBoolean(properties.getOrDefault(REQUIRE_USAGE_PRIVILEGES, "true"));
   }
 
   /**

@@ -91,7 +91,8 @@ public class ElasticsearchAuthorizationPlugin implements AuthorizationPlugin {
     this.properties.validate();
     this.client = new ElasticsearchSecurityClient(properties);
     this.translator =
-        new ElasticsearchRoleTranslator(properties.indexPrefix(), client::listIndices);
+        new ElasticsearchRoleTranslator(
+            properties.indexPrefix(), client::listIndices, properties.requireUsagePrivileges());
 
     warnOnLicense(client.licenseType());
 
@@ -120,7 +121,8 @@ public class ElasticsearchAuthorizationPlugin implements AuthorizationPlugin {
     this.properties = properties;
     this.client = client;
     this.translator =
-        new ElasticsearchRoleTranslator(properties.indexPrefix(), client::listIndices);
+        new ElasticsearchRoleTranslator(
+            properties.indexPrefix(), client::listIndices, properties.requireUsagePrivileges());
     this.reconciler = null;
   }
 

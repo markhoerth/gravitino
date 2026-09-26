@@ -44,8 +44,12 @@ public class TestElasticsearchRoleTranslator {
   private static final List<String> CLUSTER_INDICES =
       ImmutableList.of("careiq_claims", "careiq_members", "careiq_pii", "reference_codes");
 
+  // The existing cases exercise privilege translation on its own, with the usage gate off.
   private final ElasticsearchRoleTranslator translator =
-      new ElasticsearchRoleTranslator("", () -> new ArrayList<>(CLUSTER_INDICES));
+      new ElasticsearchRoleTranslator("", () -> new ArrayList<>(CLUSTER_INDICES), false);
+
+  private final ElasticsearchRoleTranslator gated =
+      new ElasticsearchRoleTranslator("", () -> new ArrayList<>(CLUSTER_INDICES), true);
 
   @Test
   public void testTableSelectBecomesReadOnExactIndex() {
@@ -78,7 +82,7 @@ public class TestElasticsearchRoleTranslator {
   @Test
   public void testIndexPrefixScopesCatalogGrant() {
     ElasticsearchRoleTranslator prefixed =
-        new ElasticsearchRoleTranslator("careiq_", () -> new ArrayList<>(CLUSTER_INDICES));
+        new ElasticsearchRoleTranslator("careiq_", () -> new ArrayList<>(CLUSTER_INDICES), false);
     SecurableObject catalog =
         SecurableObjects.ofCatalog("es", ImmutableList.of(Privileges.SelectTable.allow()));
     ObjectNode descriptor = prefixed.translate(role("broad", ImmutableList.of(catalog)), "prod");
@@ -169,6 +173,61 @@ public class TestElasticsearchRoleTranslator {
     ObjectNode descriptor = translator.translate(role("none", ImmutableList.of(catalog)), "prod");
 
     assertEquals(0, descriptor.get("indices").size());
+  }
+
+  @Test
+  public void testSelectWithoutUsagePrivilegesIsNotPushed() {
+    SecurableObject catalog =
+        SecurableObjects.ofCatalog("es", ImmutableList.of(Privileges.SelectTable.allow()));
+    ObjectNode descriptor = gated.translate(role("reader", ImmutableList.of(catalog)), "prod");
+
+    assertEquals(
+        0,
+        descriptor.get("indices").size(),
+        "Gravitino refuses a table read without USE_CATALOG and USE_SCHEMA");
+  }
+
+  @Test
+  public void testSelectWithUsagePrivilegesIsPushed() {
+    SecurableObject catalog =
+        SecurableObjects.ofCatalog(
+            "es",
+            ImmutableList.of(
+                Privileges.UseCatalog.allow(),
+                Privileges.UseSchema.allow(),
+                Privileges.SelectTable.allow()));
+    ObjectNode descriptor = gated.translate(role("reader", ImmutableList.of(catalog)), "prod");
+
+    assertEquals(1, descriptor.get("indices").size());
+    assertTrue(privilegesOf(descriptor.get("indices").get(0)).contains("read"));
+  }
+
+  @Test
+  public void testUsageOnSchemaSatisfiesTheSchemaHalfOfTheGate() {
+    SecurableObject catalog =
+        SecurableObjects.ofCatalog("es", ImmutableList.of(Privileges.UseCatalog.allow()));
+    SecurableObject schema =
+        SecurableObjects.ofSchema(
+            SecurableObjects.ofCatalog("es", ImmutableList.of()),
+            "default",
+            ImmutableList.of(Privileges.UseSchema.allow(), Privileges.SelectTable.allow()));
+
+    ObjectNode descriptor =
+        gated.translate(role("reader", ImmutableList.of(catalog, schema)), "prod");
+
+    assertTrue(descriptor.get("indices").size() > 0);
+  }
+
+  @Test
+  public void testUsagePrivilegesAloneStillGrantVisibility() {
+    SecurableObject catalog =
+        SecurableObjects.ofCatalog(
+            "es", ImmutableList.of(Privileges.UseCatalog.allow(), Privileges.UseSchema.allow()));
+    ObjectNode descriptor = gated.translate(role("browser", ImmutableList.of(catalog)), "prod");
+
+    List<String> privileges = privilegesOf(descriptor.get("indices").get(0));
+    assertTrue(privileges.contains("view_index_metadata"));
+    assertFalse(privileges.contains("read"));
   }
 
   private static List<String> privilegesOf(JsonNode entry) {

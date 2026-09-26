@@ -32,6 +32,7 @@ authorization.elasticsearch.password = ...
 | `authorization.elasticsearch.tls.insecure` | `false` | Skip certificate verification, development only |
 | `authorization.elasticsearch.api-key.invalidate-on-revoke` | `true` | Invalidate a user's API keys when their grants change |
 | `authorization.elasticsearch.native-user.bind` | `true` | Bind roles to native users of the same name when they exist |
+| `authorization.elasticsearch.require-usage-privileges` | `true` | Require USE_CATALOG and USE_SCHEMA in the role before pushing data privileges |
 
 The account the plugin authenticates as needs `manage_security`.
 
@@ -97,6 +98,36 @@ clusters that only use external realms.
 One consequence worth knowing: assigning a `gravitino_*` role to a native user by hand grants that
 user the role's privileges, and Gravitino has no record of it. Reconciliation rewrites what a role
 contains, not who holds it.
+
+## Usage privileges
+
+Gravitino does not grant table access on a data privilege alone. Its expression for loading a table
+reads:
+
+```
+ANY(OWNER, METALAKE, CATALOG) ||
+SCHEMA_OWNER_WITH_USE_CATALOG ||
+ANY_USE_CATALOG && ANY_USE_SCHEMA && (TABLE::OWNER || ANY_SELECT_TABLE || ANY_MODIFY_TABLE)
+```
+
+So a role holding only `SELECT_TABLE` grants nothing in Gravitino. The plugin applies the same rule
+before pushing: a role's data privileges reach Elasticsearch only when the role also carries
+`USE_CATALOG` at metalake or catalog level and `USE_SCHEMA` at metalake, catalog or schema level.
+A role that fails the check is still written, carrying whatever its usage privileges grant, and the
+skipped privileges are logged.
+
+Set `authorization.elasticsearch.require-usage-privileges` to `false` to push data privileges
+regardless, which makes Elasticsearch more permissive than Gravitino.
+
+Two places where the plugin is stricter than Gravitino, both erring toward less access:
+
+- **Usage and data privileges split across roles.** Gravitino evaluates the expression against
+  everything a user holds, so `USE_CATALOG` in one role and `SELECT_TABLE` in another satisfies it.
+  The plugin translates one role at a time, so the data privilege is not pushed. Keep the usage
+  privileges in the same role as the data privileges.
+- **Ownership.** The first two branches of the expression grant access through ownership of the
+  metalake, catalog or schema. Elasticsearch has no ownership concept and the plugin does not
+  translate owners, so access that depends on ownership alone is not pushed.
 
 ## Known limits
 

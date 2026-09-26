@@ -63,7 +63,27 @@ public final class ElasticsearchPrivileges {
           .put(Privilege.Name.USE_SCHEMA, ImmutableSet.of(VIEW_INDEX_METADATA))
           .build();
 
+  private static final ImmutableSet<Privilege.Name> USAGE_GATED =
+      ImmutableSet.of(
+          Privilege.Name.SELECT_TABLE,
+          Privilege.Name.SELECT_VIEW,
+          Privilege.Name.MODIFY_TABLE,
+          Privilege.Name.CREATE_TABLE,
+          Privilege.Name.CREATE_VIEW);
+
   private ElasticsearchPrivileges() {}
+
+  /**
+   * Returns whether a privilege reaches data or objects, and so requires the usage privileges
+   * alongside it. Gravitino gates these on USE_CATALOG and USE_SCHEMA; USE_CATALOG and USE_SCHEMA
+   * themselves are not gated.
+   *
+   * @param name the Gravitino privilege name.
+   * @return true when the privilege requires USE_CATALOG and USE_SCHEMA.
+   */
+  public static boolean requiresUsage(Privilege.Name name) {
+    return USAGE_GATED.contains(name);
+  }
 
   /**
    * Returns the Elasticsearch index privileges a Gravitino privilege maps to.

@@ -228,7 +228,11 @@ demo() {
     {
       "fullName": "$CATALOG",
       "type": "CATALOG",
-      "privileges": [{"name": "SELECT_TABLE", "condition": "ALLOW"}]
+      "privileges": [
+        {"name": "USE_CATALOG", "condition": "ALLOW"},
+        {"name": "USE_SCHEMA", "condition": "ALLOW"},
+        {"name": "SELECT_TABLE", "condition": "ALLOW"}
+      ]
     }
   ]
 }
@@ -242,6 +246,8 @@ JSON
   show_es_role "$ANALYST"
   note "Gravitino wrote this. The catalog grant became the index pattern ${INDEX_PREFIX}*,"
   note "and SELECT_TABLE became read plus view_index_metadata."
+  note "USE_CATALOG and USE_SCHEMA are in the role because Gravitino requires them before a"
+  note "table read is allowed, so the plugin requires them before pushing one."
   pause
 
   banner "STEP 4  Grant the role to a user and a group through Gravitino"

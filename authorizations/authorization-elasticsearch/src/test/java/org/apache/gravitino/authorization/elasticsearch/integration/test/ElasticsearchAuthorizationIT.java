@@ -236,8 +236,18 @@ public class ElasticsearchAuthorizationIT {
     silently("DELETE", "/_security/role/gravitino_it_" + name);
   }
 
+  /**
+   * A catalog grant carrying the usage privileges alongside the data privilege, which is what
+   * Gravitino requires before a table read is allowed and what the plugin therefore requires before
+   * pushing one.
+   */
   private static SecurableObject catalogSelect() {
-    return SecurableObjects.ofCatalog("es", ImmutableList.of(Privileges.SelectTable.allow()));
+    return SecurableObjects.ofCatalog(
+        "es",
+        ImmutableList.of(
+            Privileges.UseCatalog.allow(),
+            Privileges.UseSchema.allow(),
+            Privileges.SelectTable.allow()));
   }
 
   private static SecurableObject tableDeny(String index) {

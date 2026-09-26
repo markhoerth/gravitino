@@ -141,8 +141,9 @@ Privileges with no Elasticsearch counterpart are dropped rather than approximate
 
 ### Putting the three together
 
-Granting `SELECT_TABLE` on the catalog `search`, in the metalake `demo`, with `index.prefix` set to
-`demo_`, and granting that role to the user `mark`, produces this in Elasticsearch:
+Granting `USE_CATALOG`, `USE_SCHEMA` and `SELECT_TABLE` on the catalog `search`, in the metalake
+`demo`, with `index.prefix` set to `demo_`, and granting that role to the user `mark`, produces this
+in Elasticsearch:
 
 ```
 PUT _security/role/gravitino_demo_analyst
@@ -175,6 +176,30 @@ Gravitino privilege:
 
 Both require a paid Elastic subscription tier. A field removed by field-level security is absent
 from results and cannot be queried, sorted or aggregated, so nothing leaks through a filter.
+
+## Usage privileges are required
+
+Gravitino does not grant table access on a data privilege alone. Its expression for loading a table
+reads:
+
+```
+ANY(OWNER, METALAKE, CATALOG) ||
+SCHEMA_OWNER_WITH_USE_CATALOG ||
+ANY_USE_CATALOG && ANY_USE_SCHEMA && (TABLE::OWNER || ANY_SELECT_TABLE || ANY_MODIFY_TABLE)
+```
+
+A role holding only `SELECT_TABLE` therefore grants nothing in Gravitino, and the plugin applies the
+same rule: data privileges are pushed only when the role also carries `USE_CATALOG` at metalake or
+catalog level and `USE_SCHEMA` at metalake, catalog or schema level. Privileges skipped for that
+reason are logged, and the role is still written carrying whatever its usage privileges grant.
+
+The plugin is stricter than Gravitino in two cases, both erring toward less access:
+
+- Gravitino evaluates the expression against everything a user holds, so `USE_CATALOG` in one role
+  and `SELECT_TABLE` in another satisfies it. The plugin translates one role at a time, so keep the
+  usage privileges in the same role as the data privileges.
+- The ownership branches have no Elasticsearch equivalent, so access that depends on owning the
+  metalake, catalog or schema is not pushed.
 
 ## Deny
 
@@ -351,6 +376,9 @@ Each index appears as a table under the synthetic schema \`default\`.
 
 ## 2. Create a role with a read privilege on the catalog
 
+`USE_CATALOG` and `USE_SCHEMA` accompany the data privilege because Gravitino requires them before
+a table read is allowed.
+
 \`\`\`
 curl -s -X POST -H 'Content-Type: application/json' \\
   -H 'Accept: application/vnd.gravitino.v1+json' \\
@@ -359,7 +387,9 @@ curl -s -X POST -H 'Content-Type: application/json' \\
         "properties": {},
         "securableObjects": [
           {"fullName": "search", "type": "CATALOG",
-           "privileges": [{"name": "SELECT_TABLE", "condition": "ALLOW"}]}
+           "privileges": [{"name": "USE_CATALOG", "condition": "ALLOW"},
+                          {"name": "USE_SCHEMA", "condition": "ALLOW"},
+                          {"name": "SELECT_TABLE", "condition": "ALLOW"}]}
         ]
       }' \\
   https://gravitino.example.com:8090/api/metalakes/demo/roles
