@@ -349,20 +349,31 @@ catalog loads, and warns when it reports `basic`.
 
 ## What has been tested
 
-Both components, against Elasticsearch 9.1.0 and 8.15.0 on a trial license: a single node over HTTP,
-authenticating against the native realm. The unit and integration suites, a script that exercises
-Elasticsearch's own behaviour, a walkthrough of the privilege lifecycle, and the row filter and
-column restriction path all pass on both versions, so the security API these components use behaves
-the same across that major boundary.
+Both components, against Elasticsearch 9.1.0 and 8.15.0 on a trial license, on a single node over
+HTTP. The unit and integration suites, a script that exercises Elasticsearch's own behaviour, a
+walkthrough of the privilege lifecycle, and the row filter and column restriction path all pass on
+both versions, so the security API these components use behaves the same across that major boundary.
+
+Both identity paths have been exercised against a live cluster:
+
+- **A JWT realm.** A token asserting a username authenticated through the realm and picked up the
+  Gravitino role from the mapping, with no user record existing in Elasticsearch for that name. A
+  second token carrying only a groups claim picked up the role through the group rule, for a person
+  Gravitino had never been told about. A token for someone with no grant received nothing. Claims
+  arrive in user metadata as `jwt_claim_*`, which is what a templated document-level security query
+  can filter on.
+- **The native realm.** A grant bound the role onto an existing local user, leaving that user's
+  other roles and password untouched, and the user could then query what the role allowed.
 
 Not exercised, and worth confirming in your environment:
 
 - TLS with a private certificate authority. Verification is either on or skipped, so a private CA
   needs its certificate in the JVM trust store of the Gravitino server.
 - A multi-node cluster.
-- Any external realm. Role mappings are written and read back correctly, but no JWT, OIDC or SAML
-  realm has resolved one, so the claim-to-username mapping described above is by design rather than
-  by observation.
+- OIDC and SAML realms. Realms differ only in how a caller proves who they are: a JWT arrives as a
+  bearer token on each request, while OIDC and SAML run an interactive login. Role mappings are
+  evaluated after that, against the username and groups the realm produced, so the mapping the
+  plugin writes behaves the same whichever realm is in use. Only the JWT realm has been run here.
 - A basic license beyond the warning the plugin logs. Index privileges should work there; row
   filters and column restrictions will be rejected by the cluster.
 
