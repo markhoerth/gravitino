@@ -188,16 +188,77 @@ The role name comes from part 1, `demo_*` from part 2, the two privileges from p
 
 ### Row filters and column restrictions
 
-Separate from the privileges above, and configured on the role's properties rather than through a
-Gravitino privilege:
+Gravitino has no privilege that expresses a row filter or a column restriction, and no policy type
+wired to one. The plugin therefore takes them from properties set on the role. Treat the property
+keys as temporary: a privilege or a policy type is the natural home for this, and adding one would
+change how these are expressed. What Elasticsearch does with them would not change.
 
 | Role property | Becomes |
 | --- | --- |
-| `elasticsearch.dls.<index>`, or `.*` for every index in the role | A document-level security query on that index entry, filtering which documents are visible |
-| `elasticsearch.fls.<index>`, or `.*` | A field-level security exception list, removing those fields |
+| `elasticsearch.dls.<index>`, or `elasticsearch.dls.*` for every index in the role | A document-level security query on that index entry, filtering which documents are visible |
+| `elasticsearch.fls.<index>`, or `elasticsearch.fls.*` | A field-level security exception list, removing those fields |
 
-Both require a paid Elastic subscription tier. A field removed by field-level security is absent
-from results and cannot be queried, sorted or aggregated, so nothing leaks through a filter.
+Properties are set when the role is created, alongside its securable objects:
+
+```
+POST /api/metalakes/demo/roles
+{
+  "name": "REGIONAL_ANALYST",
+  "properties": {
+    "elasticsearch.dls.*": "{\"term\":{\"region\":\"west\"}}",
+    "elasticsearch.fls.demo_claims": "ssn, member.dob"
+  },
+  "securableObjects": [
+    {"fullName": "search", "type": "CATALOG",
+     "privileges": [{"name": "USE_CATALOG", "condition": "ALLOW"},
+                    {"name": "USE_SCHEMA", "condition": "ALLOW"},
+                    {"name": "SELECT_TABLE", "condition": "ALLOW"}]}
+  ]
+}
+```
+
+The value of a `dls` property is a Query DSL object as a JSON string. The value of an `fls` property
+is a comma separated list of field paths. That role produces this in Elasticsearch:
+
+```
+{
+  "indices": [
+    {
+      "names": ["demo_*"],
+      "privileges": ["read", "view_index_metadata"],
+      "query": { "term": { "region": "west" } }
+    }
+  ]
+}
+```
+
+with the `field_security` block added on the entry for `demo_claims`:
+
+```
+"field_security": { "grant": ["*"], "except": ["ssn", "member.dob"] }
+```
+
+A document-level security query can be templated on the caller, so one role serves every region:
+
+```
+"elasticsearch.dls.*": "{\"term\":{\"region\":\"{{_user.metadata.region}}\"}}"
+```
+
+With a JWT realm, token claims are available under `_user.metadata`, so an attribute held in the
+identity provider drives the filter.
+
+Three constraints:
+
+- Both require a paid Elastic subscription tier. On a basic license the cluster rejects the role.
+- A field removed by field-level security is absent from results and cannot be queried, sorted or
+  aggregated, so nothing leaks through a filter. Elasticsearch removes the field rather than masking
+  its value, so a partial reveal or a hash needs a masked copy written at ingest.
+- Elasticsearch does not permit document updates on an index under either restriction, so the
+  plugin rejects a role carrying both write access and a restriction on the same index. Keep read
+  roles and write roles separate.
+
+A row filter expressed here must be a Query DSL object. Functions, subqueries and joins have no
+equivalent.
 
 ## Usage privileges are required
 
@@ -377,31 +438,31 @@ paths, add the authorization module to \`settings.gradle.kts\`, and build:
 \`\`\`
 EOF
 
-cat > "$STAGE/VERIFY.md" <<EOF
+cat > "$STAGE/VERIFY.md" <<'VERIFY_EOF'
 # Verifying the installation
 
 A privilege set in Gravitino, observed in Elasticsearch, then enforced against a real query. The
 example uses a native Elasticsearch user, which needs no identity provider, and takes a few minutes.
 
 Substitute your own cluster URL, credentials, metalake name and index names throughout. The example
-assumes a catalog named \`search\` created as in INSTALL.md, with \`index.prefix\` set to \`demo_\`,
-and two indices \`demo_claims\` and \`demo_pii\`.
+assumes a catalog named `search` created as in INSTALL.md, with `index.prefix` set to `demo_`,
+and two indices `demo_claims` and `demo_pii`.
 
 ## 1. Confirm the catalog sees the indices
 
-\`\`\`
+```
 curl -s -H 'Accept: application/vnd.gravitino.v1+json' \\
   https://gravitino.example.com:8090/api/metalakes/demo/catalogs/search/schemas/default/tables
-\`\`\`
+```
 
-Each index appears as a table under the synthetic schema \`default\`.
+Each index appears as a table under the synthetic schema `default`.
 
 ## 2. Create a role with a read privilege on the catalog
 
-\`USE_CATALOG\` and \`USE_SCHEMA\` accompany the data privilege because Gravitino requires them before
+`USE_CATALOG` and `USE_SCHEMA` accompany the data privilege because Gravitino requires them before
 a table read is allowed.
 
-\`\`\`
+```
 curl -s -X POST -H 'Content-Type: application/json' \\
   -H 'Accept: application/vnd.gravitino.v1+json' \\
   -d '{
@@ -415,21 +476,21 @@ curl -s -X POST -H 'Content-Type: application/json' \\
         ]
       }' \\
   https://gravitino.example.com:8090/api/metalakes/demo/roles
-\`\`\`
+```
 
 ## 3. Read the role back from Elasticsearch
 
-\`\`\`
+```
 curl -s -u <account>:<password> \\
   https://es.example.com:9200/_security/role/gravitino_demo_analyst
-\`\`\`
+```
 
-The catalog grant became the index pattern \`demo_*\` with the privileges \`read\` and
-\`view_index_metadata\`. The role name is lower-cased and carries the metalake.
+The catalog grant became the index pattern `demo_*` with the privileges `read` and
+`view_index_metadata`. The role name is lower-cased and carries the metalake.
 
 ## 4. Deny one index, and see the pattern resolve
 
-\`\`\`
+```
 curl -s -X PUT -H 'Content-Type: application/json' \\
   -H 'Accept: application/vnd.gravitino.v1+json' \\
   -d '{"privileges":[{"name":"SELECT_TABLE","condition":"DENY"}]}' \\
@@ -437,25 +498,25 @@ curl -s -X PUT -H 'Content-Type: application/json' \\
 
 curl -s -u <account>:<password> \\
   https://es.example.com:9200/_security/role/gravitino_demo_analyst
-\`\`\`
+```
 
 The pattern is gone, replaced by explicit entries for the indices that remain allowed.
-\`demo_pii\` appears nowhere in the role.
+`demo_pii` appears nowhere in the role.
 
 ## 5. Create a local Elasticsearch user
 
-\`\`\`
+```
 curl -s -u <account>:<password> -X POST \\
   -H 'Content-Type: application/json' \\
   -d '{"password":"<a password>","roles":["kibana_user"]}' \\
   https://es.example.com:9200/_security/user/mark
-\`\`\`
+```
 
 The user carries one unrelated role, which the next step must leave intact.
 
 ## 6. Grant the role to that user in Gravitino
 
-\`\`\`
+```
 curl -s -X POST -H 'Content-Type: application/json' \\
   -H 'Accept: application/vnd.gravitino.v1+json' \\
   -d '{"name":"mark"}' \\
@@ -465,59 +526,133 @@ curl -s -X PUT -H 'Content-Type: application/json' \\
   -H 'Accept: application/vnd.gravitino.v1+json' \\
   -d '{"roleNames":["ANALYST"]}' \\
   https://gravitino.example.com:8090/api/metalakes/demo/permissions/users/mark/grant
-\`\`\`
+```
 
 ## 7. Confirm the binding
 
-\`\`\`
+```
 curl -s -u <account>:<password> https://es.example.com:9200/_security/user/mark
-\`\`\`
+```
 
-The user now holds \`kibana_user\` and \`gravitino_demo_analyst\`. No password appears in the
+The user now holds `kibana_user` and `gravitino_demo_analyst`. No password appears in the
 record, because the update left it alone:
 
-\`\`\`
+```
 curl -s -u mark:<a password> https://es.example.com:9200/_security/_authenticate
-\`\`\`
+```
 
 ## 8. Query as that user
 
-\`\`\`
+```
 curl -s -u mark:<a password> "https://es.example.com:9200/demo_claims/_search?size=1"
 curl -s -u mark:<a password> "https://es.example.com:9200/demo_pii/_search?size=1"
-\`\`\`
+```
 
 The first returns a hit. The second is refused with a 403 naming the effective roles:
 
-\`\`\`
+```
 action [indices:data/read/search] is unauthorized for user [mark] with effective roles
 [gravitino_demo_analyst,kibana_user] on indices [demo_pii]
-\`\`\`
+```
 
 Elasticsearch refused the query itself, using a privilege that was set in Gravitino and never
 touched in Elasticsearch by hand.
 
+## 8b. Row filters and column restrictions
+
+Requires a paid Elastic subscription tier. Skip on a basic license.
+
+Create a second role carrying a filter and a restriction, and grant it to a second local user:
+
+```
+curl -s -X POST -H 'Content-Type: application/json' \
+  -H 'Accept: application/vnd.gravitino.v1+json' \
+  -d '{
+        "name": "REGIONAL",
+        "properties": {
+          "elasticsearch.dls.*": "{\"term\":{\"region\":\"west\"}}",
+          "elasticsearch.fls.*": "ssn"
+        },
+        "securableObjects": [
+          {"fullName": "search", "type": "CATALOG",
+           "privileges": [{"name": "USE_CATALOG", "condition": "ALLOW"},
+                          {"name": "USE_SCHEMA", "condition": "ALLOW"},
+                          {"name": "SELECT_TABLE", "condition": "ALLOW"}]}
+        ]
+      }' \
+  https://gravitino.example.com:8090/api/metalakes/demo/roles
+```
+
+Read the role back from Elasticsearch and the index entry now carries a `query` and a
+`field_security` block:
+
+```
+curl -s -u <account>:<password> \
+  https://es.example.com:9200/_security/role/gravitino_demo_regional
+```
+
+Create a local user holding only that role, then query as them:
+
+```
+curl -s -u <account>:<password> -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"password":"<a password>","roles":["gravitino_demo_regional"]}' \
+  https://es.example.com:9200/_security/user/regional
+
+curl -s -u regional:<a password> "https://es.example.com:9200/demo_claims/_search"
+```
+
+Only documents matching the filter come back, and no `ssn` field appears in any of them. The
+restriction holds for aggregations as well as searches:
+
+```
+curl -s -u regional:<a password> -X POST -H 'Content-Type: application/json' \
+  -d '{"size":0,"aggs":{"regions":{"terms":{"field":"region"}}}}' \
+  "https://es.example.com:9200/demo_claims/_search"
+```
+
+One bucket, for the region the filter allows.
+
+A caution worth seeing once: Elasticsearch roles union, so a user who also holds an unrestricted
+role on the same index sees everything. The restricted role does not act as a ceiling.
+
+```
+curl -s -u <account>:<password> -X PUT \
+  -H 'Content-Type: application/json' \
+  -d '{"roles":["gravitino_demo_regional","gravitino_demo_analyst"]}' \
+  https://es.example.com:9200/_security/user/regional
+
+curl -s -u regional:<a password> "https://es.example.com:9200/demo_claims/_search"
+```
+
+Every document returns, `ssn` included. Design roles so a governed index is never reachable through
+an unrestricted role.
+
 ## 9. Clean up
 
-\`\`\`
+```
 curl -s -u <account>:<password> -X DELETE https://es.example.com:9200/_security/user/mark
+curl -s -u <account>:<password> -X DELETE https://es.example.com:9200/_security/user/regional
 curl -s -X DELETE -H 'Accept: application/vnd.gravitino.v1+json' \\
   https://gravitino.example.com:8090/api/metalakes/demo/roles/ANALYST
-\`\`\`
+curl -s -X DELETE -H 'Accept: application/vnd.gravitino.v1+json' \\
+  https://gravitino.example.com:8090/api/metalakes/demo/roles/REGIONAL
+```
 
 Deleting the role in Gravitino removes the Elasticsearch role and its mapping.
 
 ## Checking Elasticsearch behaviour on its own
 
-\`source/authorizations/authorization-elasticsearch/dev/es-authz-smoke.sh\` writes the same role
+`source/authorizations/authorization-elasticsearch/dev/es-authz-smoke.sh` writes the same role
 shapes directly to a cluster, with no Gravitino involved, and reports what Elasticsearch does with
 them: index privileges, field restrictions, row filters, and the effect of a second unrestricted
 role. It reports the license tier, skips the paid-tier checks on basic, and cleans up after itself.
 
-\`\`\`
+```
 ES_URL=https://es.example.com:9200 ES_USER=<account> ES_PASSWORD=<password> ./es-authz-smoke.sh
-\`\`\`
-EOF
+```
+VERIFY_EOF
+sed -i "s/@VERSION@/$TARGET_VERSION/g" "$STAGE/VERIFY.md"
 
 cat > "$STAGE/README.md" <<EOF
 # Elasticsearch connector and privilege pushdown for Gravitino $TARGET_VERSION
