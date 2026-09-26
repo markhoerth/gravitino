@@ -375,9 +375,14 @@ not apply no matter how this is installed.
 The bundle carries Gravitino api and core jars, so the server must be running @VERSION@ exactly.
 A mismatch fails when the catalog loads.
 
+With the server running:
+
 ```
 curl -s http://your-gravitino-host:8090/api/version
 ```
+
+If it is stopped, start it first with `$GRAVITINO_HOME/bin/gravitino.sh start`, or read the
+version from the banner it prints on startup.
 
 ## Step 2. Stop the server and unpack
 
@@ -412,14 +417,24 @@ That should report `gravitino-core-@VERSION@.jar`.
 
 ## Step 3. Enable authorization
 
-Privilege pushdown needs authorization switched on in `conf/gravitino.conf`:
+Privilege pushdown needs authorization switched on in `$GRAVITINO_HOME/conf/gravitino.conf`.
+Both keys are already in that file, so edit the existing lines rather than adding new ones:
+
+```
+grep -n gravitino.authorization $GRAVITINO_HOME/conf/gravitino.conf
+```
+
+Set the first to true:
 
 ```
 gravitino.authorization.enable = true
-gravitino.authorization.serviceAdmins = your-administrator-account
 ```
 
-Without it the role and permission endpoints return an error and nothing reaches Elasticsearch.
+The second, `gravitino.authorization.serviceAdmins`, names the accounts that administer access
+control. It ships as `anonymous`, which suits a server with no authentication configured. Change
+it only if your server authenticates its callers.
+
+Without this the role and permission endpoints return an error and nothing reaches Elasticsearch.
 
 ## Step 4. Start the server
 
@@ -430,29 +445,40 @@ curl -s http://your-gravitino-host:8090/api/version
 
 ## Step 5. Create a governed catalog
 
-One catalog carries the connector properties and the authorization properties together, so the same
-catalog both federates the cluster and governs it.
+The catalog lives in a metalake, so create one first if you do not already have it:
 
 ```
-POST /api/metalakes/your-metalake/catalogs
-{
-  "name": "search",
-  "type": "RELATIONAL",
-  "provider": "elasticsearch",
-  "properties": {
-    "elasticsearch.hosts": "https://es.example.com:9200",
-    "elasticsearch.username": "your-account",
-    "elasticsearch.password": "your-password",
+curl -s -X POST -H 'Content-Type: application/json' \
+  -H 'Accept: application/vnd.gravitino.v1+json' \
+  -d '{"name":"your-metalake","comment":"","properties":{}}' \
+  http://your-gravitino-host:8090/api/metalakes
+```
 
-    "authorization-provider": "elasticsearch",
-    "authorization.elasticsearch.url": "https://es.example.com:9200",
-    "authorization.elasticsearch.auth.type": "basic",
-    "authorization.elasticsearch.username": "your-account",
-    "authorization.elasticsearch.password": "your-password",
-    "authorization.elasticsearch.index.prefix": "",
-    "authorization.elasticsearch.reconcile.interval-seconds": "300"
-  }
-}
+One catalog carries the connector properties and the authorization properties together, so the same
+catalog both federates the cluster and governs it. Substitute your own cluster URL and credentials:
+
+```
+curl -s -X POST -H 'Content-Type: application/json' \
+  -H 'Accept: application/vnd.gravitino.v1+json' \
+  -d '{
+        "name": "search",
+        "type": "RELATIONAL",
+        "provider": "elasticsearch",
+        "properties": {
+          "elasticsearch.hosts": "https://es.example.com:9200",
+          "elasticsearch.username": "your-account",
+          "elasticsearch.password": "your-password",
+
+          "authorization-provider": "elasticsearch",
+          "authorization.elasticsearch.url": "https://es.example.com:9200",
+          "authorization.elasticsearch.auth.type": "basic",
+          "authorization.elasticsearch.username": "your-account",
+          "authorization.elasticsearch.password": "your-password",
+          "authorization.elasticsearch.index.prefix": "",
+          "authorization.elasticsearch.reconcile.interval-seconds": "300"
+        }
+      }' \
+  http://your-gravitino-host:8090/api/metalakes/your-metalake/catalogs
 ```
 
 The account the plugin authenticates as needs `manage_security`. The full property list is in
@@ -710,8 +736,8 @@ ES_URL=https://es.example.com:9200 ES_USER=<account> ES_PASSWORD=<password> ./es
 VERIFY_EOF
 sed -i "s/@VERSION@/$TARGET_VERSION/g" "$STAGE/VERIFY.md"
 
-cat > "$STAGE/README.md" <<EOF
-# Elasticsearch connector and privilege pushdown for Gravitino $TARGET_VERSION
+cat > "$STAGE/README.md" <<'README_EOF'
+# Elasticsearch connector and privilege pushdown for Gravitino @VERSION@
 
 Two components that let Gravitino govern an Elasticsearch cluster directly, with no query engine in
 the path. Prototypes provided for evaluation, not a supported product.
@@ -729,10 +755,11 @@ the path. Prototypes provided for evaluation, not a supported product.
 
 ## What else is here
 
-- \\`install/\\` holds the jars for both components, which is what INSTALL.md copies into place.
-- \\`source/\\` holds the source of both modules, their build files, a README for each, and a script
+- `install/` holds the jars for both components, which is what INSTALL.md copies into place.
+- `source/` holds the source of both modules, their build files, a README for each, and a script
   that exercises Elasticsearch's own behaviour independently of Gravitino.
-EOF
+README_EOF
+sed -i "s/@VERSION@/$TARGET_VERSION/g" "$STAGE/README.md"
 
 echo "== Archiving =="
 rm -f "$ARCHIVE"
