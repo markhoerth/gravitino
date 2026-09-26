@@ -91,6 +91,28 @@ supported product.
 Both are needed to govern Elasticsearch. The connector supplies the tables that privileges are
 granted on. The plugin puts those privileges into the cluster.
 
+## What this requires of your applications
+
+Applications must authenticate to Elasticsearch as the end user, and the username they authenticate
+as must be the username Gravitino granted on.
+
+Elasticsearch decides access from the identity presented on the request. If an application connects
+with a shared service account, Elasticsearch sees that one identity for every user behind it, and
+every one of them gets that account's privileges. The roles Gravitino writes are still correct, and
+they still enforce, but they enforce against the service account rather than against the person.
+Per-user privileges are not approximated in that setup; they do not apply at all.
+
+Names have to agree as well. If Gravitino grants to `mark` and the token asserts
+`mark.hoerth@example.com`, the rule matches nobody. Nothing errors in either system: the grant
+succeeds, the role and the mapping are valid, and the user simply has no access.
+
+Worth settling before installing:
+
+- How do applications authenticate to the cluster today, as the end user or as a service account?
+- Which realm will the cluster run, and which claim becomes the username?
+- Does that value match the username Gravitino holds for the same person, and do group names match?
+
+
 ## The model
 
 Gravitino is the policy authority. Elasticsearch is the enforcement point. No query engine sits in
