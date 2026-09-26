@@ -347,6 +347,25 @@ Index privileges work on any Elastic subscription level. Document-level and fiel
 and the external realms, require a paid tier. The plugin logs the cluster's license level when the
 catalog loads, and warns when it reports `basic`.
 
+## What has been tested
+
+Both components, against Elasticsearch 9.1.0 and 8.15.0 on a trial license: a single node over HTTP,
+authenticating against the native realm. The unit and integration suites, a script that exercises
+Elasticsearch's own behaviour, a walkthrough of the privilege lifecycle, and the row filter and
+column restriction path all pass on both versions, so the security API these components use behaves
+the same across that major boundary.
+
+Not exercised, and worth confirming in your environment:
+
+- TLS with a private certificate authority. Verification is either on or skipped, so a private CA
+  needs its certificate in the JVM trust store of the Gravitino server.
+- A multi-node cluster.
+- Any external realm. Role mappings are written and read back correctly, but no JWT, OIDC or SAML
+  realm has resolved one, so the claim-to-username mapping described above is by design rather than
+  by observation.
+- A basic license beyond the warning the plugin logs. Index privileges should work there; row
+  filters and column restrictions will be rejected by the cluster.
+
 ## What is not included
 
 - Value masking on read. Field-level security removes a field rather than transforming it, so
