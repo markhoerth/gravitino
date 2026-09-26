@@ -232,6 +232,9 @@ is a comma separated list of field paths. That role produces this in Elasticsear
 }
 ```
 
+Elasticsearch stores the query as a string, so reading the role back shows it quoted
+rather than as an object. Send it as an object.
+
 with the `field_security` block added on the entry for `demo_claims`:
 
 ```
