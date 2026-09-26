@@ -320,9 +320,10 @@ because their roles live on the user record. So on grant the plugin also adds th
 user of the same name when one exists, and removes it on revoke. Passwords and other roles are left
 untouched.
 
-If no native user of that name exists, the role is still written. An administrator can create the
-account and assign `gravitino_<metalake>_<role>` to it, and from then on grants and revokes in
-Gravitino reach that user through the role itself.
+If no native user of that name exists, the role is still written and nothing is created. An
+administrator can create the account later and assign `gravitino_<metalake>_<role>` to it, at which
+point that user has what the role carries. Privilege changes made in Gravitino afterwards reach
+them through the role, and revoking the role in Gravitino removes it from the account record.
 
 Set `authorization.elasticsearch.native-user.bind` to `false` to skip the native-user handling
 on clusters that use external realms only.
