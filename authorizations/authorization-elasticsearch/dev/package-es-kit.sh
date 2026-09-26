@@ -77,16 +77,16 @@ mkdir -p "$STAGE/source/authorizations/authorization-elasticsearch/dev"
 cp "$AUTHZ_MODULE/dev/es-authz-smoke.sh" \
    "$STAGE/source/authorizations/authorization-elasticsearch/dev/"
 
-cat > "$STAGE/OVERVIEW.md" <<EOF
+cat > "$STAGE/OVERVIEW.md" <<'OVERVIEW_EOF'
 # Governing Elasticsearch with Gravitino
 
-Two components for Gravitino $TARGET_VERSION. Both are prototypes provided for evaluation, not a
+Two components for Gravitino @VERSION@. Both are prototypes provided for evaluation, not a
 supported product.
 
 | Component | Installs as | What it does |
 | --- | --- | --- |
-| Elasticsearch catalog connector | \`catalogs/elasticsearch\` | Federates a cluster: each index becomes a table, each mapping becomes columns |
-| Elasticsearch authorization plugin | \`authorizations/elasticsearch\` | Writes Gravitino roles and grants into the cluster's own security configuration |
+| Elasticsearch catalog connector | `catalogs/elasticsearch` | Federates a cluster: each index becomes a table, each mapping becomes columns |
+| Elasticsearch authorization plugin | `authorizations/elasticsearch` | Writes Gravitino roles and grants into the cluster's own security configuration |
 
 Both are needed to govern Elasticsearch. The connector supplies the tables that privileges are
 granted on. The plugin puts those privileges into the cluster.
@@ -103,24 +103,78 @@ reconciliation interval.
 
 ## What is pushed down
 
+A Gravitino grant is three separate things, and each maps onto a different part of an Elasticsearch
+role. Taking them in turn.
+
+### 1. The role, and who holds it
+
 | Gravitino | Elasticsearch |
 | --- | --- |
-| Role with privileges | Role named \`gravitino_<metalake>_<role>\` |
-| Role granted to a user | Role mapping rule on \`username\`, and the role on a native user record if one exists |
-| Role granted to a group | Role mapping rule on the \`groups\` claim |
-| Catalog or schema grant | Index pattern, scoped by \`index.prefix\` |
-| Table grant | Exact index name |
-| \`SELECT_TABLE\` | \`read\`, \`view_index_metadata\` |
-| \`MODIFY_TABLE\` | \`write\`, \`view_index_metadata\` |
-| \`CREATE_TABLE\` | \`create_index\` |
-| \`USE_CATALOG\`, \`USE_SCHEMA\` | \`view_index_metadata\` |
-| Row filter | Document-level security query |
-| Column restriction | Field-level security, the field removed |
+| A role | A role named `gravitino_<metalake>_<role>` |
+| That role granted to a user | A role mapping rule on `username`, plus the role added to a native user record of that name if one exists |
+| That role granted to a group | A role mapping rule on the `groups` claim |
+
+The role holds the privileges. The mapping decides who picks them up at authentication time.
+
+### 2. What the privilege applies to
+
+Elasticsearch has no catalogs or schemas, only a flat namespace of indices, so the Gravitino
+hierarchy flattens into index names and patterns.
+
+| Granted on | Becomes |
+| --- | --- |
+| The catalog, or a schema | An index pattern, `<index.prefix>*` |
+| One table | That exact index name |
+
+A pattern covers indices created later. An exact name does not.
+
+### 3. The privilege itself
+
+| Gravitino privilege | Elasticsearch index privileges |
+| --- | --- |
+| `SELECT_TABLE` | `read`, `view_index_metadata` |
+| `MODIFY_TABLE` | `write`, `view_index_metadata` |
+| `CREATE_TABLE` | `create_index` |
+| `USE_CATALOG`, `USE_SCHEMA` | `view_index_metadata` |
 
 Privileges with no Elasticsearch counterpart are dropped rather than approximated.
 
-Roles the plugin owns carry \`"managed_by": "gravitino"\` in their metadata, along with the metalake
-and the original role name.
+### Putting the three together
+
+Granting `SELECT_TABLE` on the catalog `search`, in the metalake `demo`, with `index.prefix` set to
+`demo_`, and granting that role to the user `mark`, produces this in Elasticsearch:
+
+```
+PUT _security/role/gravitino_demo_analyst
+{
+  "indices": [
+    { "names": ["demo_*"], "privileges": ["read", "view_index_metadata"] }
+  ],
+  "metadata": { "managed_by": "gravitino", "gravitino_metalake": "demo",
+                "gravitino_role": "ANALYST" }
+}
+
+PUT _security/role_mapping/gravitino_demo_analyst__mapping
+{
+  "roles": ["gravitino_demo_analyst"],
+  "rules": { "any": [ { "field": { "username": "mark" } } ] }
+}
+```
+
+The role name comes from part 1, `demo_*` from part 2, the two privileges from part 3.
+
+### Row filters and column restrictions
+
+Separate from the privileges above, and configured on the role's properties rather than through a
+Gravitino privilege:
+
+| Role property | Becomes |
+| --- | --- |
+| `elasticsearch.dls.<index>`, or `.*` for every index in the role | A document-level security query on that index entry, filtering which documents are visible |
+| `elasticsearch.fls.<index>`, or `.*` | A field-level security exception list, removing those fields |
+
+Both require a paid Elastic subscription tier. A field removed by field-level security is absent
+from results and cannot be queried, sorted or aggregated, so nothing leaks through a filter.
 
 ## Deny
 
@@ -128,12 +182,12 @@ Elasticsearch roles only add privileges. No entry in a role subtracts from anoth
 be written directly. Gravitino realises it by computing the indices the role still reaches and
 writing those in place of the pattern.
 
-A catalog grant of \`SELECT_TABLE\` with a deny on one index therefore produces explicit entries for
+A catalog grant of `SELECT_TABLE` with a deny on one index therefore produces explicit entries for
 the indices that remain, and the denied index appears nowhere in the role.
 
 One consequence: an index created after that point is not in the list, so it stays outside the role
 until the next reconciliation pass, which runs on
-\`authorization.elasticsearch.reconcile.interval-seconds\`.
+`authorization.elasticsearch.reconcile.interval-seconds`.
 
 A second consequence, and a rule for role design: roles union. A user holding a second role that
 grants the denied index gets access to it, because there is no deny in Elasticsearch to act as a
@@ -156,23 +210,23 @@ user of the same name when one exists, and removes it on revoke. Passwords and o
 untouched.
 
 If no native user of that name exists, the role is still written. An administrator can create the
-account and assign \`gravitino_<metalake>_<role>\` to it, and from then on grants and revokes in
+account and assign `gravitino_<metalake>_<role>` to it, and from then on grants and revokes in
 Gravitino reach that user through the role itself.
 
-Set \`authorization.elasticsearch.native-user.bind\` to \`false\` to skip the native-user handling
+Set `authorization.elasticsearch.native-user.bind` to `false` to skip the native-user handling
 on clusters that use external realms only.
 
 ### Two things to plan for
 
-**Names must agree.** If Gravitino grants to \`mark\` and the token asserts
-\`mark.hoerth@example.com\`, the rule matches nobody. Nothing errors: the grant succeeds, the role
+**Names must agree.** If Gravitino grants to `mark` and the token asserts
+`mark.hoerth@example.com`, the rule matches nobody. Nothing errors: the grant succeeds, the role
 and mapping are valid, and the user simply has no access.
 
 **Applications must authenticate as the end user.** If they connect with a shared service account,
 Elasticsearch sees one identity and every user of that application gets that account's privileges.
 Per-user identity is what makes any of this enforce anything.
 
-**Hand-assigned roles are invisible to Gravitino.** Assigning a \`gravitino_*\` role to a user
+**Hand-assigned roles are invisible to Gravitino.** Assigning a `gravitino_*` role to a user
 directly grants that user the role's privileges, and Gravitino has no record of it. Reconciliation
 rewrites what a role contains, never who holds it.
 
@@ -180,7 +234,7 @@ rewrites what a role contains, never who holds it.
 
 Index privileges work on any Elastic subscription level. Document-level and field-level security,
 and the external realms, require a paid tier. The plugin logs the cluster's license level when the
-catalog loads, and warns when it reports \`basic\`.
+catalog loads, and warns when it reports `basic`.
 
 ## What is not included
 
@@ -191,9 +245,10 @@ catalog loads, and warns when it reports \`basic\`.
   AND/OR, ranges and null checks.
 - Writes to indices under row or column restrictions, which Elasticsearch does not permit.
 - A trust store option. TLS verification is either on or skipped
-  (\`elasticsearch.tls.skip-verify\`, \`authorization.elasticsearch.tls.insecure\`), so a private
+  (`elasticsearch.tls.skip-verify`, `authorization.elasticsearch.tls.insecure`), so a private
   certificate authority needs the certificate in the JVM trust store of the Gravitino server.
-EOF
+OVERVIEW_EOF
+sed -i "s/@VERSION@/$TARGET_VERSION/g" "$STAGE/OVERVIEW.md"
 
 cat > "$STAGE/INSTALL.md" <<EOF
 # Installing
