@@ -361,85 +361,138 @@ catalog loads, and warns when it reports `basic`.
 OVERVIEW_EOF
 sed -i "s/@VERSION@/$TARGET_VERSION/g" "$STAGE/OVERVIEW.md"
 
-cat > "$STAGE/INSTALL.md" <<EOF
+cat > "$STAGE/INSTALL.md" <<'INSTALL_EOF'
 # Installing
 
-Two directories drop into an existing Gravitino $TARGET_VERSION installation. The server version
-must be $TARGET_VERSION: the bundle carries Gravitino api and core jars, and a mismatch fails when
-the catalog loads.
+Six steps, about twenty minutes. Every step ends with a way to confirm it worked before moving on.
 
-\`\`\`
-tar xzf $KIT.tar.gz
-cd $KIT
-cp -r install/catalogs/elasticsearch       \\\$GRAVITINO_HOME/catalogs/
-cp -r install/authorizations/elasticsearch \\\$GRAVITINO_HOME/authorizations/
-\`\`\`
+Before starting, read the first section of OVERVIEW.md. Elasticsearch enforces against the identity
+on the request, so if applications connect with a shared service account, per-user privileges will
+not apply no matter how this is installed.
 
-## Enable authorization
+## Step 1. Check the server version
 
-Privilege pushdown requires authorization to be switched on in \`conf/gravitino.conf\`:
+The bundle carries Gravitino api and core jars, so the server must be running @VERSION@ exactly.
+A mismatch fails when the catalog loads.
 
-\`\`\`
+```
+curl -s http://your-gravitino-host:8090/api/version
+```
+
+## Step 2. Stop the server and unpack
+
+The commands below use `$GRAVITINO_HOME`, so point it at the installation directory first:
+
+```
+export GRAVITINO_HOME=/path/to/your/gravitino
+```
+
+```
+tar xzf @KIT@.tar.gz
+cd @KIT@
+cp -r install/catalogs/elasticsearch       $GRAVITINO_HOME/catalogs/
+cp -r install/authorizations/elasticsearch $GRAVITINO_HOME/authorizations/
+```
+
+Confirm both landed:
+
+```
+ls $GRAVITINO_HOME/catalogs/elasticsearch/libs
+ls $GRAVITINO_HOME/authorizations/elasticsearch/libs
+```
+
+Each should hold a jar named for the component plus its dependencies. Confirm the version matches
+the running server:
+
+```
+ls $GRAVITINO_HOME/authorizations/elasticsearch/libs | grep gravitino-core
+```
+
+That should report `gravitino-core-@VERSION@.jar`.
+
+## Step 3. Enable authorization
+
+Privilege pushdown needs authorization switched on in `conf/gravitino.conf`:
+
+```
 gravitino.authorization.enable = true
-gravitino.authorization.serviceAdmins = <the administrator account>
-\`\`\`
+gravitino.authorization.serviceAdmins = your-administrator-account
+```
 
 Without it the role and permission endpoints return an error and nothing reaches Elasticsearch.
-Restart the server after the change.
 
-## Create a governed catalog
+## Step 4. Start the server
 
-One catalog carries the connector properties and the authorization properties together:
+```
+$GRAVITINO_HOME/bin/gravitino.sh start
+curl -s http://your-gravitino-host:8090/api/version
+```
 
-\`\`\`
-POST /api/metalakes/<metalake>/catalogs
+## Step 5. Create a governed catalog
+
+One catalog carries the connector properties and the authorization properties together, so the same
+catalog both federates the cluster and governs it.
+
+```
+POST /api/metalakes/your-metalake/catalogs
 {
   "name": "search",
   "type": "RELATIONAL",
   "provider": "elasticsearch",
   "properties": {
     "elasticsearch.hosts": "https://es.example.com:9200",
-    "elasticsearch.username": "<account>",
-    "elasticsearch.password": "<password>",
+    "elasticsearch.username": "your-account",
+    "elasticsearch.password": "your-password",
 
     "authorization-provider": "elasticsearch",
     "authorization.elasticsearch.url": "https://es.example.com:9200",
     "authorization.elasticsearch.auth.type": "basic",
-    "authorization.elasticsearch.username": "<account>",
-    "authorization.elasticsearch.password": "<password>",
+    "authorization.elasticsearch.username": "your-account",
+    "authorization.elasticsearch.password": "your-password",
     "authorization.elasticsearch.index.prefix": "",
     "authorization.elasticsearch.reconcile.interval-seconds": "300"
   }
 }
-\`\`\`
+```
 
-The account the plugin authenticates as needs \`manage_security\`. The full property list is in
-\`source/authorizations/authorization-elasticsearch/README.md\`.
+The account the plugin authenticates as needs `manage_security`. The full property list is in
+`source/authorizations/authorization-elasticsearch/README.md`.
 
-\`index.prefix\` scopes catalog-level grants. With a prefix they become the pattern
-\`<prefix>*\`; with an empty prefix a catalog grant covers every index on the cluster.
+`index.prefix` scopes catalog-level grants. With a prefix they become the pattern `<prefix>*`; with
+an empty prefix a catalog grant covers every index on the cluster.
 
-## Confirm the plugin loaded
+## Step 6. Confirm both halves are live
 
-The server log records the cluster's license level as the catalog loads:
+The connector, by listing indices as tables:
 
-\`\`\`
-grep "Elasticsearch cluster reports license type" \\\$GRAVITINO_HOME/logs/gravitino-server.log
-\`\`\`
+```
+curl -s -H 'Accept: application/vnd.gravitino.v1+json' \
+  http://your-gravitino-host:8090/api/metalakes/your-metalake/catalogs/search/schemas/default/tables
+```
 
-No such line means the plugin did not load, and grants will not reach Elasticsearch.
+The plugin, by the line it logs as the catalog loads:
+
+```
+grep "Elasticsearch cluster reports license type" $GRAVITINO_HOME/logs/gravitino-server.log
+```
+
+No such line means the plugin did not load, and grants will not reach Elasticsearch. A `basic`
+license enforces index privileges but not row filters or field restrictions.
+
+Next, work through VERIFY.md.
 
 ## Rebuilding from source
 
-\`source/\` holds both modules. Copy them into a Gravitino $TARGET_VERSION source tree at the same
-paths, add the authorization module to \`settings.gradle.kts\`, and build:
+`source/` holds both modules. Copy them into a Gravitino @VERSION@ source tree at the same paths,
+add the authorization module to `settings.gradle.kts`, and build:
 
-\`\`\`
+```
 ./gradlew :catalogs:catalog-elasticsearch:build
 ./gradlew :authorizations:authorization-elasticsearch:build
 ./gradlew compileDistribution -x test
-\`\`\`
-EOF
+```
+INSTALL_EOF
+sed -i "s/@VERSION@/$TARGET_VERSION/g; s/@KIT@/$KIT/g" "$STAGE/INSTALL.md"
 
 cat > "$STAGE/VERIFY.md" <<'VERIFY_EOF'
 # Verifying the installation
@@ -454,7 +507,7 @@ and two indices `demo_claims` and `demo_pii`.
 ## 1. Confirm the catalog sees the indices
 
 ```
-curl -s -H 'Accept: application/vnd.gravitino.v1+json' \\
+curl -s -H 'Accept: application/vnd.gravitino.v1+json' \
   https://gravitino.example.com:8090/api/metalakes/demo/catalogs/search/schemas/default/tables
 ```
 
@@ -466,8 +519,8 @@ Each index appears as a table under the synthetic schema `default`.
 a table read is allowed.
 
 ```
-curl -s -X POST -H 'Content-Type: application/json' \\
-  -H 'Accept: application/vnd.gravitino.v1+json' \\
+curl -s -X POST -H 'Content-Type: application/json' \
+  -H 'Accept: application/vnd.gravitino.v1+json' \
   -d '{
         "name": "ANALYST",
         "properties": {},
@@ -477,14 +530,14 @@ curl -s -X POST -H 'Content-Type: application/json' \\
                           {"name": "USE_SCHEMA", "condition": "ALLOW"},
                           {"name": "SELECT_TABLE", "condition": "ALLOW"}]}
         ]
-      }' \\
+      }' \
   https://gravitino.example.com:8090/api/metalakes/demo/roles
 ```
 
 ## 3. Read the role back from Elasticsearch
 
 ```
-curl -s -u <account>:<password> \\
+curl -s -u <account>:<password> \
   https://es.example.com:9200/_security/role/gravitino_demo_analyst
 ```
 
@@ -494,12 +547,12 @@ The catalog grant became the index pattern `demo_*` with the privileges `read` a
 ## 4. Deny one index, and see the pattern resolve
 
 ```
-curl -s -X PUT -H 'Content-Type: application/json' \\
-  -H 'Accept: application/vnd.gravitino.v1+json' \\
-  -d '{"privileges":[{"name":"SELECT_TABLE","condition":"DENY"}]}' \\
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -H 'Accept: application/vnd.gravitino.v1+json' \
+  -d '{"privileges":[{"name":"SELECT_TABLE","condition":"DENY"}]}' \
   https://gravitino.example.com:8090/api/metalakes/demo/permissions/roles/ANALYST/table/search.default.demo_pii/grant
 
-curl -s -u <account>:<password> \\
+curl -s -u <account>:<password> \
   https://es.example.com:9200/_security/role/gravitino_demo_analyst
 ```
 
@@ -509,9 +562,9 @@ The pattern is gone, replaced by explicit entries for the indices that remain al
 ## 5. Create a local Elasticsearch user
 
 ```
-curl -s -u <account>:<password> -X POST \\
-  -H 'Content-Type: application/json' \\
-  -d '{"password":"<a password>","roles":["kibana_user"]}' \\
+curl -s -u <account>:<password> -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"password":"<a password>","roles":["kibana_user"]}' \
   https://es.example.com:9200/_security/user/mark
 ```
 
@@ -520,14 +573,14 @@ The user carries one unrelated role, which the next step must leave intact.
 ## 6. Grant the role to that user in Gravitino
 
 ```
-curl -s -X POST -H 'Content-Type: application/json' \\
-  -H 'Accept: application/vnd.gravitino.v1+json' \\
-  -d '{"name":"mark"}' \\
+curl -s -X POST -H 'Content-Type: application/json' \
+  -H 'Accept: application/vnd.gravitino.v1+json' \
+  -d '{"name":"mark"}' \
   https://gravitino.example.com:8090/api/metalakes/demo/users
 
-curl -s -X PUT -H 'Content-Type: application/json' \\
-  -H 'Accept: application/vnd.gravitino.v1+json' \\
-  -d '{"roleNames":["ANALYST"]}' \\
+curl -s -X PUT -H 'Content-Type: application/json' \
+  -H 'Accept: application/vnd.gravitino.v1+json' \
+  -d '{"roleNames":["ANALYST"]}' \
   https://gravitino.example.com:8090/api/metalakes/demo/permissions/users/mark/grant
 ```
 
@@ -636,9 +689,9 @@ an unrestricted role.
 ```
 curl -s -u <account>:<password> -X DELETE https://es.example.com:9200/_security/user/mark
 curl -s -u <account>:<password> -X DELETE https://es.example.com:9200/_security/user/regional
-curl -s -X DELETE -H 'Accept: application/vnd.gravitino.v1+json' \\
+curl -s -X DELETE -H 'Accept: application/vnd.gravitino.v1+json' \
   https://gravitino.example.com:8090/api/metalakes/demo/roles/ANALYST
-curl -s -X DELETE -H 'Accept: application/vnd.gravitino.v1+json' \\
+curl -s -X DELETE -H 'Accept: application/vnd.gravitino.v1+json' \
   https://gravitino.example.com:8090/api/metalakes/demo/roles/REGIONAL
 ```
 
@@ -660,14 +713,25 @@ sed -i "s/@VERSION@/$TARGET_VERSION/g" "$STAGE/VERIFY.md"
 cat > "$STAGE/README.md" <<EOF
 # Elasticsearch connector and privilege pushdown for Gravitino $TARGET_VERSION
 
-- \`OVERVIEW.md\` explains what the two components do, what is pushed down, how deny is handled,
-  and how identity has to line up.
-- \`INSTALL.md\` covers installation, the required configuration, and creating a governed catalog.
-- \`VERIFY.md\` walks through setting a privilege in Gravitino and watching Elasticsearch enforce it.
-- \`install/\` holds the jars for both components.
-- \`source/\` holds the source of both modules, with the plugin's own README and the smoke script.
+Two components that let Gravitino govern an Elasticsearch cluster directly, with no query engine in
+the path. Prototypes provided for evaluation, not a supported product.
 
-Prototypes provided for evaluation. Not a supported product.
+## Read these in order
+
+1. **OVERVIEW.md** explains what the two components do and what gets pushed into Elasticsearch.
+   Start with its first section, which covers the one prerequisite that decides whether any of this
+   enforces anything in your environment. Settle that before installing.
+2. **INSTALL.md** covers the install, the server configuration it needs, and creating a catalog that
+   both federates and governs the cluster. About twenty minutes.
+3. **VERIFY.md** is a walkthrough: set a privilege in Gravitino, watch it appear in Elasticsearch,
+   then watch Elasticsearch refuse a query on the strength of it. About ten minutes, and worth doing
+   before anything else is built on top.
+
+## What else is here
+
+- \\`install/\\` holds the jars for both components, which is what INSTALL.md copies into place.
+- \\`source/\\` holds the source of both modules, their build files, a README for each, and a script
+  that exercises Elasticsearch's own behaviour independently of Gravitino.
 EOF
 
 echo "== Archiving =="
