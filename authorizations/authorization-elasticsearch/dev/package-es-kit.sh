@@ -376,7 +376,7 @@ Each index appears as a table under the synthetic schema \`default\`.
 
 ## 2. Create a role with a read privilege on the catalog
 
-`USE_CATALOG` and `USE_SCHEMA` accompany the data privilege because Gravitino requires them before
+\`USE_CATALOG\` and \`USE_SCHEMA\` accompany the data privilege because Gravitino requires them before
 a table read is allowed.
 
 \`\`\`
