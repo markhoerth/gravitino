@@ -71,3 +71,4 @@ web/.next
 *.swp
 *.swo
 .*.sw?
+gravitino-elasticsearch-kit-*/
