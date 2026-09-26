@@ -95,6 +95,15 @@ public class ElasticsearchAuthorizationProperties extends AuthorizationPropertie
   public static final String TLS_INSECURE = "authorization.elasticsearch.tls.insecure";
 
   /**
+   * Bind the Elasticsearch role to a native (local realm) user of the same name when one exists.
+   * Role mappings only apply to external realms, so without this a grant to a native user writes a
+   * mapping that is never consulted. Native users are never created by the plugin: when no user of
+   * that name exists, the role is still written and waits for an administrator to create the
+   * account and assign it.
+   */
+  public static final String BIND_NATIVE_USERS = "authorization.elasticsearch.native-user.bind";
+
+  /**
    * Invalidate the Elasticsearch API keys owned by a user when that user's grants change. Keys
    * capture the owner's privileges at creation time, so without this a revoke does not reach keys
    * already issued.
@@ -244,6 +253,15 @@ public class ElasticsearchAuthorizationProperties extends AuthorizationPropertie
    */
   public boolean tlsInsecure() {
     return Boolean.parseBoolean(properties.getOrDefault(TLS_INSECURE, "false"));
+  }
+
+  /**
+   * Returns whether the plugin binds roles to native users of the same name.
+   *
+   * @return true when native users are bound, the default.
+   */
+  public boolean bindNativeUsers() {
+    return Boolean.parseBoolean(properties.getOrDefault(BIND_NATIVE_USERS, "true"));
   }
 
   /**

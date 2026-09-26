@@ -30,6 +30,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -229,6 +230,7 @@ public class ElasticsearchAuthorizationPlugin implements AuthorizationPlugin {
     for (Role role : roles) {
       applyRole(role);
       updateRoleMapping(role, "username", user.name(), true);
+      bindNativeUser(role, user.name(), true);
     }
     return true;
   }
@@ -238,6 +240,7 @@ public class ElasticsearchAuthorizationPlugin implements AuthorizationPlugin {
       throws AuthorizationPluginException {
     for (Role role : roles) {
       updateRoleMapping(role, "username", user.name(), false);
+      bindNativeUser(role, user.name(), false);
     }
     if (properties.invalidateApiKeysOnRevoke()) {
       client.invalidateApiKeysOf(user.name());
@@ -358,6 +361,86 @@ public class ElasticsearchAuthorizationPlugin implements AuthorizationPlugin {
     appliedRoles.put(role.name(), role);
     LOG.info(
         "Applied Gravitino role {} to Elasticsearch as {}", role.name(), esRoleName(role.name()));
+  }
+
+  /**
+   * Binds or unbinds the Elasticsearch role on a native (local realm) user of the same name.
+   *
+   * <p>Role mappings are only consulted for external realms, so a grant to a user who authenticates
+   * against the native realm needs the role on the user record itself. The plugin never creates the
+   * account: when no native user of that name exists, the role has still been written and an
+   * administrator can create the user and assign it, after which further grants and revokes on that
+   * role reach them through the role itself.
+   */
+  private void bindNativeUser(Role role, String username, boolean bind) {
+    if (!properties.bindNativeUsers()) {
+      return;
+    }
+
+    String esRole = esRoleName(role.name());
+    Optional<JsonNode> existing;
+    try {
+      existing = client.getUser(username);
+    } catch (AuthorizationPluginException e) {
+      LOG.warn("Failed to read the native Elasticsearch user {}", username, e);
+      return;
+    }
+
+    if (!existing.isPresent()) {
+      if (bind) {
+        LOG.info(
+            "No native Elasticsearch user {} exists. Role {} has been written and is ready to be "
+                + "assigned if that user is created in the native realm.",
+            username,
+            esRole);
+      }
+      return;
+    }
+
+    JsonNode user = existing.get();
+    Set<String> roles = new LinkedHashSet<>();
+    user.path("roles").forEach(node -> roles.add(node.asText()));
+
+    boolean changed = bind ? roles.add(esRole) : roles.remove(esRole);
+    if (!changed) {
+      return;
+    }
+
+    // The password is omitted, which leaves it untouched. Every other field is carried over so the
+    // update does not discard anything the administrator set.
+    ObjectNode body = MAPPER.createObjectNode();
+    ArrayNode roleArray = body.putArray("roles");
+    roles.forEach(roleArray::add);
+    copyIfPresent(user, body, "full_name");
+    copyIfPresent(user, body, "email");
+    if (user.has("metadata")) {
+      body.set("metadata", user.get("metadata"));
+    }
+    if (user.has("enabled")) {
+      body.put("enabled", user.path("enabled").asBoolean(true));
+    }
+
+    try {
+      client.putUser(username, body);
+      LOG.info(
+          "{} role {} on the native Elasticsearch user {}",
+          bind ? "Bound" : "Unbound",
+          esRole,
+          username);
+    } catch (AuthorizationPluginException e) {
+      LOG.warn(
+          "Failed to update the roles of the native Elasticsearch user {}. The role itself has "
+              + "been written and can be assigned by an administrator.",
+          username,
+          e);
+    }
+  }
+
+  private static void copyIfPresent(JsonNode source, ObjectNode target, String field) {
+    JsonNode value = source.get(field);
+    if (value != null && !value.isNull()) {
+      target.set(field, value);
+    }
   }
 
   /**

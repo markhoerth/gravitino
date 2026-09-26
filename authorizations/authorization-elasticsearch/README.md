@@ -31,6 +31,7 @@ authorization.elasticsearch.password = ...
 | `authorization.elasticsearch.request.timeout-ms` | `10000` | Security API request timeout |
 | `authorization.elasticsearch.tls.insecure` | `false` | Skip certificate verification, development only |
 | `authorization.elasticsearch.api-key.invalidate-on-revoke` | `true` | Invalidate a user's API keys when their grants change |
+| `authorization.elasticsearch.native-user.bind` | `true` | Bind roles to native users of the same name when they exist |
 
 The account the plugin authenticates as needs `manage_security`.
 
@@ -71,6 +72,31 @@ Document-level security queries may template on the caller, for example
 
 Both require a paid Elastic tier. The plugin logs a warning at startup when the cluster reports a
 basic license, and the role descriptors carrying restrictions will be rejected by the cluster.
+
+## Users and identity
+
+Elasticsearch holds no users in this model. A grant of a role to a user becomes a role mapping rule
+on the username, and a grant to a group becomes a rule on the groups claim, both evaluated at
+authentication time against whoever just connected. That means the username Gravitino grants on has
+to be the username the caller authenticates as, and the same for group names.
+
+Role mappings are only consulted for external realms such as JWT, OIDC and SAML. For a user who
+authenticates against the **native realm**, roles live on the user record instead, so the plugin
+also binds the role there:
+
+- If a native user of that name exists, the Elasticsearch role is added to its roles on grant and
+  removed on revoke. Other roles, the password and the rest of the record are left alone.
+- If no such user exists, the role is still written. An administrator can create the account and
+  assign `gravitino_<metalake>_<role>` to it, and later grants and revokes on that role reach the
+  user through the role itself.
+
+The plugin never creates native users, because it would have to invent a password nobody can use.
+Set `authorization.elasticsearch.native-user.bind` to `false` to skip the binding entirely on
+clusters that only use external realms.
+
+One consequence worth knowing: assigning a `gravitino_*` role to a native user by hand grants that
+user the role's privileges, and Gravitino has no record of it. Reconciliation rewrites what a role
+contains, not who holds it.
 
 ## Known limits
 

@@ -195,6 +195,28 @@ public class ElasticsearchSecurityClient implements Closeable {
   }
 
   /**
+   * Reads a native (local realm) user.
+   *
+   * @param username the username.
+   * @return the user record, empty when no native user of that name exists.
+   */
+  public Optional<JsonNode> getUser(String username) {
+    String body = executeAllowingNotFound("GET", "/_security/user/" + encode(username), null);
+    return parseNamedEntry(body, username);
+  }
+
+  /**
+   * Updates a native user. The password is left untouched, so this only changes the fields the
+   * caller supplies.
+   *
+   * @param username the username.
+   * @param user the user record to write.
+   */
+  public void putUser(String username, ObjectNode user) {
+    execute("PUT", "/_security/user/" + encode(username), user.toString());
+  }
+
+  /**
    * Invalidates every API key owned by a user, so that a revoked grant reaches keys already issued.
    *
    * @param username the owner's username.

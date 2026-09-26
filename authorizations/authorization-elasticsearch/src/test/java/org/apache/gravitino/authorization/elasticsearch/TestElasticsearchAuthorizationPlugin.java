@@ -23,6 +23,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
@@ -132,6 +133,52 @@ public class TestElasticsearchAuthorizationPlugin {
     assertTrue(client.roles.containsKey("gravitino_prod_reader"));
   }
 
+  @Test
+  public void testGrantBindsTheRoleToAnExistingNativeUser() {
+    ObjectNode existing = JsonNodeFactory.instance.objectNode();
+    existing.putArray("roles").add("kibana_user");
+    existing.put("full_name", "Mark Hoerth");
+    client.users.put("mhoerth", existing);
+
+    Role role = readerRole();
+    plugin.onGrantedRolesToUser(ImmutableList.of(role), user("mhoerth"));
+
+    List<String> roles = new ArrayList<>();
+    client.users.get("mhoerth").get("roles").forEach(node -> roles.add(node.asText()));
+
+    assertTrue(roles.contains("gravitino_prod_reader"));
+    assertTrue(roles.contains("kibana_user"), "existing roles must be preserved");
+    assertEquals("Mark Hoerth", client.users.get("mhoerth").get("full_name").asText());
+    assertFalse(client.users.get("mhoerth").has("password"), "the password must be left untouched");
+  }
+
+  @Test
+  public void testRevokeUnbindsTheRoleFromANativeUser() {
+    ObjectNode existing = JsonNodeFactory.instance.objectNode();
+    existing.putArray("roles").add("kibana_user");
+    client.users.put("mhoerth", existing);
+
+    Role role = readerRole();
+    plugin.onGrantedRolesToUser(ImmutableList.of(role), user("mhoerth"));
+    plugin.onRevokedRolesFromUser(ImmutableList.of(role), user("mhoerth"));
+
+    List<String> roles = new ArrayList<>();
+    client.users.get("mhoerth").get("roles").forEach(node -> roles.add(node.asText()));
+
+    assertFalse(roles.contains("gravitino_prod_reader"));
+    assertTrue(roles.contains("kibana_user"));
+  }
+
+  @Test
+  public void testGrantStillWritesTheRoleWhenNoNativeUserExists() {
+    Role role = readerRole();
+    plugin.onGrantedRolesToUser(ImmutableList.of(role), user("nobody"));
+
+    assertTrue(client.roles.containsKey("gravitino_prod_reader"));
+    assertTrue(client.roleMappings.containsKey("gravitino_prod_reader__mapping"));
+    assertFalse(client.users.containsKey("nobody"), "the plugin must not create native users");
+  }
+
   private static List<String> ruleValues(ObjectNode mapping, String field) {
     List<String> values = new ArrayList<>();
     mapping
@@ -214,6 +261,7 @@ public class TestElasticsearchAuthorizationPlugin {
 
     private final Map<String, ObjectNode> roles = new HashMap<>();
     private final Map<String, ObjectNode> roleMappings = new HashMap<>();
+    private final Map<String, ObjectNode> users = new HashMap<>();
     private final List<String> invalidatedKeyOwners = new ArrayList<>();
 
     FakeSecurityClient() {
@@ -248,6 +296,16 @@ public class TestElasticsearchAuthorizationPlugin {
     @Override
     public Optional<JsonNode> getRoleMapping(String mappingName) {
       return Optional.ofNullable(roleMappings.get(mappingName));
+    }
+
+    @Override
+    public Optional<JsonNode> getUser(String username) {
+      return Optional.ofNullable(users.get(username));
+    }
+
+    @Override
+    public void putUser(String username, ObjectNode user) {
+      users.put(username, user);
     }
 
     @Override
