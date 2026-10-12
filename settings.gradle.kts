@@ -66,7 +66,7 @@ include("iceberg:iceberg-rest-server")
 include("iceberg:iceberg-rest-trino-it")
 include("lance:lance-common")
 include("lance:lance-rest-server")
-include("authorizations:authorization-ranger", "authorizations:authorization-common", "authorizations:authorization-chain", "authorizations:authorization-kafka-acl")
+include("authorizations:authorization-ranger", "authorizations:authorization-common", "authorizations:authorization-chain", "authorizations:authorization-kafka-acl", "authorizations:authorization-kafka-acl-import")
 val skipTrinoConnector: Boolean =
   gradle.startParameter.projectProperties["skipTrinoConnector"]?.toBoolean() ?: false
 if (!skipTrinoConnector) {
