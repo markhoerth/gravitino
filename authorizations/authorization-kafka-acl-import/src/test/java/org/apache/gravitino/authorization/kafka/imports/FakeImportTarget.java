@@ -24,6 +24,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.apache.gravitino.authorization.SecurableObject;
 
@@ -37,9 +38,10 @@ class FakeImportTarget implements GravitinoImportTarget {
   final Map<String, Set<String>> grants = new HashMap<>();
   final List<String> calls = new ArrayList<>();
   final List<String> writes = new ArrayList<>();
+  String failOn;
 
   FakeImportTarget(Map<String, String> catalogProperties, Set<String> topics) {
-    this.catalogProperties = catalogProperties;
+    this.catalogProperties = new HashMap<>(catalogProperties);
     this.topics = topics;
   }
 
@@ -57,37 +59,57 @@ class FakeImportTarget implements GravitinoImportTarget {
 
   @Override
   public boolean userExists(String user) {
-    calls.add("userExists " + user);
+    call("userExists " + user, false);
     return users.contains(user);
   }
 
   @Override
   public void addUser(String user) {
-    calls.add("addUser " + user);
-    writes.add("addUser " + user);
+    call("addUser " + user, true);
     users.add(user);
   }
 
   @Override
-  public boolean roleExists(String role) {
-    calls.add("roleExists " + role);
-    return roles.containsKey(role);
+  public Optional<List<SecurableObject>> roleSecurableObjects(String role) {
+    call("roleSecurableObjects " + role, false);
+    return Optional.ofNullable(roles.get(role));
   }
 
   @Override
   public void createRole(String role, List<SecurableObject> securableObjects) {
-    calls.add("createRole " + role);
-    writes.add("createRole " + role);
+    call("createRole " + role, true);
     roles.put(role, securableObjects);
   }
 
   @Override
   public void grantRoleToUser(String role, String user) {
-    calls.add("grantRoleToUser " + role + " " + user);
-    writes.add("grantRoleToUser " + role + " " + user);
+    call("grantRoleToUser " + role + " " + user, true);
     grants.computeIfAbsent(user, u -> new HashSet<>()).add(role);
   }
 
   @Override
+  public void setCatalogProperty(String key, String value) {
+    call("setCatalogProperty " + key + "=" + value, true);
+    catalogProperties.put(key, value);
+  }
+
+  @Override
+  public String triggerReconcile() {
+    call("triggerReconcile", true);
+    return "fake";
+  }
+
+  @Override
   public void close() {}
+
+  /** Records a call, then throws if {@link #failOn} is a prefix of it. */
+  private void call(String call, boolean write) {
+    calls.add(call);
+    if (failOn != null && call.startsWith(failOn)) {
+      throw new IllegalStateException("injected failure: " + call);
+    }
+    if (write) {
+      writes.add(call);
+    }
+  }
 }

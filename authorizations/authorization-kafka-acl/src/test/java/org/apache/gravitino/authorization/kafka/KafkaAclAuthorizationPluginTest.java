@@ -22,9 +22,11 @@ import static org.apache.gravitino.authorization.Privilege.Name.CONSUME_TOPIC;
 import static org.apache.gravitino.authorization.kafka.KafkaGrant.Effect.ALLOW;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyCollection;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 import com.google.common.collect.ImmutableList;
@@ -38,6 +40,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
+import org.apache.gravitino.MetadataObject;
+import org.apache.gravitino.authorization.Group;
 import org.apache.gravitino.authorization.Role;
 import org.apache.gravitino.authorization.User;
 import org.apache.gravitino.exceptions.AuthorizationPluginException;
@@ -252,6 +256,82 @@ public class KafkaAclAuthorizationPluginTest {
     Assertions.assertTrue(
         e.getMessage().contains("Kafka authorization is not enabled"), e.getMessage());
     verify(admin).close();
+  }
+
+  @Test
+  public void testPausedHooksSkipKafka() {
+    grants.add(KafkaGrant.topic(P, "order_events", CONSUME_TOPIC, ALLOW));
+    KafkaAclAuthorizationPlugin plugin =
+        new KafkaAclAuthorizationPlugin(
+            "analytics",
+            ImmutableMap.of(
+                KafkaAclProperties.BOOTSTRAP_SERVERS,
+                "localhost:9092",
+                KafkaAclProperties.RECONCILE_PAUSED,
+                "true"),
+            source,
+            admin);
+    Assertions.assertEquals(KafkaAclAuthorizationPlugin.Health.PAUSED, plugin.health());
+    clearInvocations(admin);
+
+    Role role = mock(Role.class);
+    User user = mock(User.class);
+    Group group = mock(Group.class);
+    List<Boolean> results =
+        ImmutableList.of(
+            plugin.onMetadataUpdated(),
+            plugin.onRoleCreated(role),
+            plugin.onRoleAcquired(role),
+            plugin.onRoleDeleted(role),
+            plugin.onRoleUpdated(role),
+            plugin.onGrantedRolesToUser(ImmutableList.of(role), user),
+            plugin.onRevokedRolesFromUser(ImmutableList.of(role), user),
+            plugin.onGrantedRolesToGroup(ImmutableList.of(role), group),
+            plugin.onRevokedRolesFromGroup(ImmutableList.of(role), group),
+            plugin.onUserAdded(user),
+            plugin.onUserRemoved(user),
+            plugin.onUserAcquired(user),
+            plugin.onGroupAdded(group),
+            plugin.onGroupRemoved(group),
+            plugin.onGroupAcquired(group),
+            plugin.onOwnerSet(mock(MetadataObject.class), null, null));
+    Assertions.assertTrue(results.stream().allMatch(Boolean.TRUE::equals));
+    verifyNoInteractions(admin);
+    Assertions.assertTrue(cluster.isEmpty());
+  }
+
+  @Test
+  public void testUnpausedPluginReconcilesNormally() {
+    grants.add(KafkaGrant.topic(P, "order_events", CONSUME_TOPIC, ALLOW));
+    // Core rebuilds the plugin when a catalog property changes; unpausing yields a new instance.
+    KafkaAclAuthorizationPlugin paused =
+        new KafkaAclAuthorizationPlugin(
+            "analytics",
+            ImmutableMap.of(
+                KafkaAclProperties.BOOTSTRAP_SERVERS,
+                "localhost:9092",
+                KafkaAclProperties.RECONCILE_PAUSED,
+                "true"),
+            source,
+            admin);
+    paused.onGrantedRolesToUser(ImmutableList.of(), mock(User.class));
+    Assertions.assertTrue(cluster.isEmpty());
+
+    KafkaAclAuthorizationPlugin resumed =
+        new KafkaAclAuthorizationPlugin(
+            "analytics",
+            ImmutableMap.of(
+                KafkaAclProperties.BOOTSTRAP_SERVERS,
+                "localhost:9092",
+                KafkaAclProperties.RECONCILE_PAUSED,
+                "false"),
+            source,
+            admin);
+    Assertions.assertEquals(KafkaAclAuthorizationPlugin.Health.HEALTHY, resumed.health());
+    Assertions.assertEquals(
+        Boolean.TRUE, resumed.onOwnerSet(mock(MetadataObject.class), null, null));
+    Assertions.assertEquals(3, cluster.size());
+    Assertions.assertEquals(KafkaAclAuthorizationPlugin.Health.HEALTHY, newPlugin().health());
   }
 
   private KafkaAclAuthorizationPlugin newPlugin() {

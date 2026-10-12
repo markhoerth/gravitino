@@ -26,6 +26,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.authorization.Group;
@@ -57,11 +58,22 @@ public class KafkaAclAuthorizationPlugin implements AuthorizationPlugin {
 
   private static final Logger LOG = LoggerFactory.getLogger(KafkaAclAuthorizationPlugin.class);
 
+  /** The state of the plugin. */
+  public enum Health {
+    /** Hooks reconcile normally. */
+    HEALTHY,
+    /** {@link KafkaAclProperties#RECONCILE_PAUSED} is set; hooks skip Kafka. */
+    PAUSED
+  }
+
   private final KafkaAclProperties properties;
   private final KafkaPrincipalResolver resolver;
   private final KafkaAclTranslator translator;
   private final EffectiveGrantSource grantSource;
   private final Admin admin;
+  // A catalog property change rebuilds the catalog wrapper and with it this plugin, so the flag
+  // is fixed for the lifetime of the instance.
+  private final boolean paused;
 
   /**
    * Creates a plugin that reads grants from Gravitino.
@@ -93,6 +105,7 @@ public class KafkaAclAuthorizationPlugin implements AuthorizationPlugin {
     this.translator = new KafkaAclTranslator(metalake, properties.groupPrefixTemplate());
     this.grantSource = grantSource;
     this.admin = admin;
+    this.paused = properties.reconcilePaused();
     try {
       verifyCluster();
     } catch (RuntimeException e) {
@@ -100,6 +113,15 @@ public class KafkaAclAuthorizationPlugin implements AuthorizationPlugin {
       throw e;
     }
     LOG.info("Kafka ACL authorization plugin created for metalake {}: {}", metalake, properties);
+  }
+
+  /**
+   * Returns the state of the plugin.
+   *
+   * @return {@link Health#PAUSED} while reconcile is paused, {@link Health#HEALTHY} otherwise
+   */
+  public Health health() {
+    return paused ? Health.PAUSED : Health.HEALTHY;
   }
 
   /**
@@ -157,94 +179,103 @@ public class KafkaAclAuthorizationPlugin implements AuthorizationPlugin {
     if (!pending.removesCatalog() && !removedTopics.isEmpty()) {
       pending = PendingRemovals.topics(removedTopics);
     }
-    return reconcile(pending, true);
+    PendingRemovals removals = pending;
+    return hook("onMetadataUpdated", () -> reconcile(removals, true));
   }
 
   @Override
   public Boolean onRoleCreated(Role role) throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onRoleCreated", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public Boolean onRoleAcquired(Role role) throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onRoleAcquired", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public Boolean onRoleDeleted(Role role) throws AuthorizationPluginException {
     // Core calls this hook before deleting the role from the store.
-    return reconcile(PendingRemovals.role(role.name()), true);
+    return hook("onRoleDeleted", () -> reconcile(PendingRemovals.role(role.name()), true));
   }
 
   @Override
   public Boolean onRoleUpdated(Role role, RoleChange... changes)
       throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), true);
+    return hook("onRoleUpdated", () -> reconcile(PendingRemovals.none(), true));
   }
 
   @Override
   public Boolean onGrantedRolesToUser(List<Role> roles, User user)
       throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onGrantedRolesToUser", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public Boolean onRevokedRolesFromUser(List<Role> roles, User user)
       throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), true);
+    return hook("onRevokedRolesFromUser", () -> reconcile(PendingRemovals.none(), true));
   }
 
   @Override
   public Boolean onGrantedRolesToGroup(List<Role> roles, Group group)
       throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onGrantedRolesToGroup", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public Boolean onRevokedRolesFromGroup(List<Role> roles, Group group)
       throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), true);
+    return hook("onRevokedRolesFromGroup", () -> reconcile(PendingRemovals.none(), true));
   }
 
   @Override
   public Boolean onUserAdded(User user) throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onUserAdded", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public Boolean onUserRemoved(User user) throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.user(user.name()), true);
+    return hook("onUserRemoved", () -> reconcile(PendingRemovals.user(user.name()), true));
   }
 
   @Override
   public Boolean onUserAcquired(User user) throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onUserAcquired", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public Boolean onGroupAdded(Group group) throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onGroupAdded", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public Boolean onGroupRemoved(Group group) throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.group(group.name()), true);
+    return hook("onGroupRemoved", () -> reconcile(PendingRemovals.group(group.name()), true));
   }
 
   @Override
   public Boolean onGroupAcquired(Group group) throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onGroupAcquired", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public Boolean onOwnerSet(MetadataObject metadataObject, Owner preOwner, Owner newOwner)
       throws AuthorizationPluginException {
-    return reconcile(PendingRemovals.none(), false);
+    return hook("onOwnerSet", () -> reconcile(PendingRemovals.none(), false));
   }
 
   @Override
   public void close() throws IOException {
     admin.close();
+  }
+
+  private Boolean hook(String name, Supplier<Boolean> reconcile) {
+    if (paused) {
+      LOG.warn("kafka-acl reconcile paused; skipped {}", name);
+      return Boolean.TRUE;
+    }
+    return reconcile.get();
   }
 
   private boolean owned(AclBinding binding) {

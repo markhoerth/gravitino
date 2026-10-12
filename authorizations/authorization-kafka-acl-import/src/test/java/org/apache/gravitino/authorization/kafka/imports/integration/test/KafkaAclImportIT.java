@@ -45,6 +45,7 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import org.apache.gravitino.authorization.SecurableObject;
@@ -294,8 +295,8 @@ public class KafkaAclImportIT {
     }
 
     @Override
-    public boolean roleExists(String role) {
-      return false;
+    public Optional<List<SecurableObject>> roleSecurableObjects(String role) {
+      return Optional.empty();
     }
 
     @Override
@@ -306,6 +307,17 @@ public class KafkaAclImportIT {
     @Override
     public void grantRoleToUser(String role, String user) {
       wrote = true;
+    }
+
+    @Override
+    public void setCatalogProperty(String key, String value) {
+      wrote = true;
+    }
+
+    @Override
+    public String triggerReconcile() {
+      wrote = true;
+      return "none";
     }
 
     @Override

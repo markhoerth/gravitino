@@ -40,6 +40,10 @@ dependencies {
   implementation(libs.slf4j.api)
   implementation(libs.slf4j.simple)
 
+  // The apply IT drives the real plugin, whose interface lives in core.
+  testImplementation(project(":core")) {
+    exclude(group = "*")
+  }
   testImplementation(libs.junit.jupiter.api)
   testImplementation(libs.mockito.core)
   testImplementation(libs.testcontainers)

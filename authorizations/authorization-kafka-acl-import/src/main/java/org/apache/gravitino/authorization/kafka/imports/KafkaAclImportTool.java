@@ -24,9 +24,11 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableList;
+import com.google.common.hash.Hashing;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.PrintStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -36,9 +38,11 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Properties;
 import java.util.Set;
 import java.util.TreeSet;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 import org.apache.commons.cli.ParseException;
@@ -74,8 +78,10 @@ public class KafkaAclImportTool {
     PLANNED,
     /** The user, role and grant were written. */
     CREATED,
-    /** A role with this name already exists; it was left untouched and not granted. */
-    ROLE_EXISTS,
+    /** The role already exists with exactly the planned contents; it was (re)granted. */
+    ROLE_EXISTS_GRANTED,
+    /** The role already exists with different contents; it was left untouched and not granted. */
+    ROLE_EXISTS_DIFFERENT,
     /** A Gravitino call failed; see the error in the report. */
     FAILED
   }
@@ -127,7 +133,7 @@ public class KafkaAclImportTool {
 
     try (Admin admin = Admin.create(kafkaConfig);
         GravitinoImportTarget target = targets.apply(options)) {
-      return run(options, admin, target, out).succeeded() ? 0 : 1;
+      return run(options, admin, target, out).exitCode();
     } catch (Exception e) {
       err.println("Import failed: " + e);
       return 1;
@@ -162,58 +168,126 @@ public class KafkaAclImportTool {
     for (MappedGrant grant : plan.mapped()) {
       grantsByUser.computeIfAbsent(grant.gravitinoUser(), u -> new ArrayList<>()).add(grant);
     }
-
     List<ObjectNode> roles = new ArrayList<>();
-    boolean failed = false;
     for (Map.Entry<String, List<MappedGrant>> entry : grantsByUser.entrySet()) {
-      String user = entry.getKey();
-      String role = roleName(user);
-      ObjectNode node = MAPPER.createObjectNode().put("user", user).put("role", role);
+      ObjectNode node =
+          MAPPER
+              .createObjectNode()
+              .put("user", entry.getKey())
+              .put("role", roleName(entry.getKey()))
+              .put("status", RoleStatus.PLANNED.name());
       node.set("topics", MAPPER.valueToTree(topicsOf(entry.getValue())));
-      RoleStatus status = RoleStatus.PLANNED;
-      if (options.apply) {
-        try {
-          status = apply(target, options.catalog, user, role, entry.getValue());
-        } catch (RuntimeException e) {
-          status = RoleStatus.FAILED;
-          node.put("error", e.toString());
-          failed = true;
-        }
-      }
-      roles.add(node.put("status", status.name()));
+      roles.add(node);
     }
 
-    List<AclBinding> missing = ImmutableList.of();
-    if (options.apply) {
-      // Every hook the import fired has reconciled by now; check the cluster kept what we imported.
+    ApplyResult result = new ApplyResult();
+    List<AclBinding> denyRemovals = pluginDeleteDenies(plan, props);
+    if (options.apply && !denyRemovals.isEmpty() && !options.acceptDenyRemoval) {
+      out.printf(
+          "REFUSED: the plugin would delete %d unmapped DENY ACL(s) under %s, widening access."
+              + " Remove or replace them first, or pass --accept-deny-removal:%n",
+          denyRemovals.size(), props.principalPrefix());
+      denyRemovals.forEach(acl -> out.println("  " + acl));
+      result.status = "REFUSED";
+      result.exitCode = 2;
+    } else if (options.apply) {
+      apply(options, target, grantsByUser, roles, result, out);
+      // Every hook has run by now; check the cluster kept what we imported.
       Set<AclBinding> now = new HashSet<>(admin.describeAcls(AclBindingFilter.ANY).values().get());
       List<AclBinding> expected = new ArrayList<>(plan.implied());
       plan.mapped().forEach(g -> expected.add(g.source()));
-      missing =
+      result.missing =
           expected.stream()
               .filter(b -> !now.contains(b))
               .sorted(KafkaAclImportPlanner.ACL_ORDER)
               .collect(Collectors.toList());
-      failed |= !missing.isEmpty();
+      if (!result.missing.isEmpty()) {
+        result.fail();
+      }
     }
 
-    ObjectNode report =
-        report(options, props, pluginActive, acls.size(), plan, roles, missing, failed);
+    ObjectNode report = report(options, props, pluginActive, acls.size(), plan, roles, result);
     Files.write(options.report, MAPPER.writeValueAsBytes(report));
-    printSummary(out, options, props, pluginActive, acls.size(), plan, roles, missing);
+    printSummary(out, options, props, pluginActive, acls.size(), plan, roles, result);
     out.println("Report written to " + options.report.toAbsolutePath());
-    return new Outcome(!failed, report);
+    return new Outcome(result.exitCode, report);
   }
 
   /**
-   * The role name for an imported user: {@code kafka_import_} plus the user name with every
-   * character outside {@code [A-Za-z0-9_]} replaced by {@code _}.
+   * Pauses the plugin, writes users, roles and grants, always unpauses (also on failure and on JVM
+   * shutdown), then fires one hook so the plugin reconciles once against the final state.
+   */
+  private static void apply(
+      ImportOptions options,
+      GravitinoImportTarget target,
+      Map<String, List<MappedGrant>> grantsByUser,
+      List<ObjectNode> roles,
+      ApplyResult result,
+      PrintStream out) {
+    AtomicBoolean unpaused = new AtomicBoolean(false);
+    Runnable unpause =
+        () -> {
+          if (unpaused.compareAndSet(false, true)) {
+            target.setCatalogProperty(KafkaAclProperties.RECONCILE_PAUSED, "false");
+          }
+        };
+    Thread shutdownHook = new Thread(unpause, "kafka-acl-import-unpause");
+    Runtime.getRuntime().addShutdownHook(shutdownHook);
+    try {
+      target.setCatalogProperty(KafkaAclProperties.RECONCILE_PAUSED, "true");
+      for (ObjectNode node : roles) {
+        String user = node.get("user").asText();
+        String role = node.get("role").asText();
+        try {
+          node.put(
+              "status",
+              applyUser(target, options.catalog, user, role, grantsByUser.get(user)).name());
+        } catch (RuntimeException e) {
+          node.put("status", RoleStatus.FAILED.name()).put("error", e.toString());
+          result.fail();
+        }
+      }
+    } finally {
+      try {
+        unpause.run();
+        result.unpaused = true;
+      } catch (RuntimeException e) {
+        result.fail();
+        result.errors.add(
+            "Failed to clear "
+                + KafkaAclProperties.RECONCILE_PAUSED
+                + "; the plugin stays paused until it is set to false: "
+                + e);
+      }
+      try {
+        Runtime.getRuntime().removeShutdownHook(shutdownHook);
+      } catch (IllegalStateException e) {
+        // The JVM is already shutting down and runs the hook itself.
+      }
+    }
+
+    if (result.unpaused) {
+      try {
+        result.reconcileTrigger = target.triggerReconcile();
+      } catch (RuntimeException e) {
+        result.fail();
+        result.errors.add("Failed to trigger a reconcile after unpausing: " + e);
+      }
+    }
+    result.errors.forEach(e -> out.println("ERROR: " + e));
+  }
+
+  /**
+   * The role name for an imported user: {@code kafka_import_}, the user name with every character
+   * outside {@code [A-Za-z0-9_]} replaced by {@code _}, then {@code _} and the first 8 hex digits
+   * of the SHA-256 of the original user name, so that names that sanitize alike cannot collide.
    *
    * @param user the Gravitino user name
    * @return the role name
    */
   public static String roleName(String user) {
-    return ROLE_PREFIX + user.replaceAll("[^A-Za-z0-9_]", "_");
+    String hash = Hashing.sha256().hashString(user, StandardCharsets.UTF_8).toString();
+    return ROLE_PREFIX + user.replaceAll("[^A-Za-z0-9_]", "_") + "_" + hash.substring(0, 8);
   }
 
   /**
@@ -250,21 +324,38 @@ public class KafkaAclImportTool {
     return objects;
   }
 
-  private static RoleStatus apply(
+  private static RoleStatus applyUser(
       GravitinoImportTarget target,
       String catalog,
       String user,
       String role,
       List<MappedGrant> grants) {
-    if (target.roleExists(role)) {
-      return RoleStatus.ROLE_EXISTS;
+    List<SecurableObject> planned = securableObjects(catalog, grants);
+    Optional<List<SecurableObject>> existing = target.roleSecurableObjects(role);
+    if (existing.isPresent() && !normalize(existing.get()).equals(normalize(planned))) {
+      return RoleStatus.ROLE_EXISTS_DIFFERENT;
     }
     if (!target.userExists(user)) {
       target.addUser(user);
     }
-    target.createRole(role, securableObjects(catalog, grants));
+    if (existing.isPresent()) {
+      target.grantRoleToUser(role, user);
+      return RoleStatus.ROLE_EXISTS_GRANTED;
+    }
+    target.createRole(role, planned);
     target.grantRoleToUser(role, user);
     return RoleStatus.CREATED;
+  }
+
+  /** Compares roles by object type, full name and the set of (condition, privilege) pairs. */
+  private static Set<String> normalize(List<SecurableObject> objects) {
+    Set<String> normalized = new TreeSet<>();
+    for (SecurableObject object : objects) {
+      Set<String> privileges = new TreeSet<>();
+      object.privileges().forEach(p -> privileges.add(p.condition() + " " + p.name()));
+      normalized.add(object.type() + " " + object.fullName() + " " + privileges);
+    }
+    return normalized;
   }
 
   private static Set<String> topicsOf(List<MappedGrant> grants) {
@@ -278,12 +369,11 @@ public class KafkaAclImportTool {
       int aclCount,
       ImportPlan plan,
       List<ObjectNode> roles,
-      List<AclBinding> missing,
-      boolean failed) {
+      ApplyResult result) {
     ObjectNode report = MAPPER.createObjectNode();
     report
         .put("mode", options.apply ? "apply" : "dry-run")
-        .put("status", failed ? "FAILED" : "OK")
+        .put("status", result.status)
         .put("metalake", options.metalake)
         .put("catalog", options.catalog)
         .put("principalPrefix", props.principalPrefix())
@@ -325,9 +415,16 @@ public class KafkaAclImportTool {
     ArrayNode additions = report.putArray("pluginWillCreate");
     plan.additions().forEach(b -> additions.add(acl(b)));
     report.putArray("roles").addAll(roles);
+    ArrayNode denies = report.putArray("pluginWillDeleteDeny");
+    pluginDeleteDenies(plan, props).forEach(b -> denies.add(acl(b)));
     if (options.apply) {
+      report.put("acceptDenyRemoval", options.acceptDenyRemoval);
+      report.put("unpaused", result.unpaused);
+      report.put("reconcileTrigger", result.reconcileTrigger);
       ArrayNode missingNode = report.putArray("missingAfterApply");
-      missing.forEach(b -> missingNode.add(acl(b)));
+      result.missing.forEach(b -> missingNode.add(acl(b)));
+      ArrayNode errors = report.putArray("errors");
+      result.errors.forEach(errors::add);
     }
     return report;
   }
@@ -340,7 +437,7 @@ public class KafkaAclImportTool {
       int aclCount,
       ImportPlan plan,
       List<ObjectNode> roles,
-      List<AclBinding> missing) {
+      ApplyResult result) {
     out.printf(
         "Kafka ACL import (%s) metalake=%s catalog=%s%n",
         options.apply ? "apply" : "dry run", options.metalake, options.catalog);
@@ -357,9 +454,8 @@ public class KafkaAclImportTool {
     }
     if (pluginActive) {
       out.println(
-          "WARNING: the kafka-acl plugin is active on this catalog. Every role created or granted"
-              + " during --apply triggers a reconcile that removes owned ACLs of users not yet"
-              + " imported, until the last grant lands. Apply in a maintenance window.");
+          "The kafka-acl plugin is active on this catalog; --apply pauses its reconcile while"
+              + " importing and triggers one reconcile afterwards.");
     }
     out.println("Roles:");
     for (ObjectNode role : roles) {
@@ -370,8 +466,9 @@ public class KafkaAclImportTool {
           role.get("status").asText(),
           role.get("topics"));
     }
-    if (options.apply) {
-      row(out, "imported ACLs missing after apply", missing.size());
+    if (options.apply && result.unpaused) {
+      out.println("Reconcile triggered via " + result.reconcileTrigger);
+      row(out, "imported ACLs missing after apply", result.missing.size());
     }
   }
 
@@ -414,18 +511,37 @@ public class KafkaAclImportTool {
         .put("permission", b.entry().permissionType().name());
   }
 
+  /** Mutable state of one --apply. */
+  private static final class ApplyResult {
+    private String status = "OK";
+    private int exitCode = 0;
+    private boolean unpaused;
+    private String reconcileTrigger;
+    private List<AclBinding> missing = ImmutableList.of();
+    private final List<String> errors = new ArrayList<>();
+
+    private void fail() {
+      status = "FAILED";
+      exitCode = 1;
+    }
+  }
+
   /** The result of one run. */
   static final class Outcome {
-    private final boolean succeeded;
+    private final int exitCode;
     private final ObjectNode report;
 
-    Outcome(boolean succeeded, ObjectNode report) {
-      this.succeeded = succeeded;
+    Outcome(int exitCode, ObjectNode report) {
+      this.exitCode = exitCode;
       this.report = report;
     }
 
+    int exitCode() {
+      return exitCode;
+    }
+
     boolean succeeded() {
-      return succeeded;
+      return exitCode == 0;
     }
 
     ObjectNode report() {

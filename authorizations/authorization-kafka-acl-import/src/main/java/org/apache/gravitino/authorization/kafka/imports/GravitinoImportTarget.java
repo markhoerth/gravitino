@@ -21,6 +21,7 @@ package org.apache.gravitino.authorization.kafka.imports;
 import java.io.Closeable;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import org.apache.gravitino.authorization.SecurableObject;
 
@@ -52,9 +53,9 @@ public interface GravitinoImportTarget extends Closeable {
 
   /**
    * @param role the role name
-   * @return whether the role exists in the metalake
+   * @return the role's securable objects, or empty if the role does not exist
    */
-  boolean roleExists(String role);
+  Optional<List<SecurableObject>> roleSecurableObjects(String role);
 
   /**
    * Creates a role.
@@ -71,4 +72,20 @@ public interface GravitinoImportTarget extends Closeable {
    * @param user the Gravitino user name
    */
   void grantRoleToUser(String role, String user);
+
+  /**
+   * Sets one property on the target catalog.
+   *
+   * @param key the property key
+   * @param value the property value
+   */
+  void setCatalogProperty(String key, String value);
+
+  /**
+   * Makes a change with no effect on grants that still fires an authorization plugin hook on the
+   * target catalog, so the plugin reconciles once.
+   *
+   * @return a description of the change and the hook it fires
+   */
+  String triggerReconcile();
 }

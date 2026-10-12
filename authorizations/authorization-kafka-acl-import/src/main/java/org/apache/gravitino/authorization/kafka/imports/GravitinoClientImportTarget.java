@@ -22,10 +22,15 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.stream.Collectors;
+import org.apache.gravitino.CatalogChange;
+import org.apache.gravitino.MetadataObject;
+import org.apache.gravitino.MetadataObjects;
 import org.apache.gravitino.NameIdentifier;
 import org.apache.gravitino.Namespace;
+import org.apache.gravitino.authorization.Owner;
 import org.apache.gravitino.authorization.SecurableObject;
 import org.apache.gravitino.client.GravitinoClient;
 import org.apache.gravitino.exceptions.NoSuchRoleException;
@@ -87,12 +92,11 @@ public class GravitinoClientImportTarget implements GravitinoImportTarget {
   }
 
   @Override
-  public boolean roleExists(String role) {
+  public Optional<List<SecurableObject>> roleSecurableObjects(String role) {
     try {
-      client.getRole(role);
-      return true;
+      return Optional.of(client.getRole(role).securableObjects());
     } catch (NoSuchRoleException e) {
-      return false;
+      return Optional.empty();
     }
   }
 
@@ -104,6 +108,32 @@ public class GravitinoClientImportTarget implements GravitinoImportTarget {
   @Override
   public void grantRoleToUser(String role, String user) {
     client.grantRolesToUser(Collections.singletonList(role), user);
+  }
+
+  @Override
+  public void setCatalogProperty(String key, String value) {
+    client.alterCatalog(catalog, CatalogChange.setProperty(key, value));
+  }
+
+  /**
+   * Re-sets the catalog's owner to its current owner. It is the lightest change available through
+   * the public API that reaches the plugin: one owner-relation upsert, no change to users, roles or
+   * grants, and it fires {@code onOwnerSet} on this catalog's plugin only.
+   */
+  @Override
+  public String triggerReconcile() {
+    MetadataObject object = MetadataObjects.of(null, catalog, MetadataObject.Type.CATALOG);
+    Owner owner =
+        client
+            .getOwner(object)
+            .orElseThrow(
+                () ->
+                    new IllegalStateException(
+                        "Catalog " + catalog + " has no owner; cannot trigger a reconcile"));
+    client.setOwner(object, owner.name(), owner.type());
+    return String.format(
+        "onOwnerSet: re-set owner of catalog %s to its current owner %s %s",
+        catalog, owner.type(), owner.name());
   }
 
   @Override

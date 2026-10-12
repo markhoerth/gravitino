@@ -56,6 +56,12 @@ public class KafkaAclProperties extends AuthorizationProperties {
   /** Placeholder for the Principal name (without the type) in the group prefix template. */
   public static final String PRINCIPAL_PLACEHOLDER = "${principal}";
 
+  /**
+   * While true, every plugin hook returns without touching Kafka. Used by the ACL importer so that
+   * hooks fired mid-import do not delete ACLs of users not yet imported.
+   */
+  public static final String RECONCILE_PAUSED = PREFIX + "reconcile-paused";
+
   /** Properties with this prefix are passed through, prefix stripped, to the Kafka AdminClient. */
   public static final String ADMIN_PREFIX = PREFIX + "admin.";
 
@@ -133,6 +139,15 @@ public class KafkaAclProperties extends AuthorizationProperties {
    */
   public String groupPrefixTemplate() {
     return properties.getOrDefault(GROUP_PREFIX_TEMPLATE, DEFAULT_GROUP_PREFIX_TEMPLATE);
+  }
+
+  /**
+   * Returns whether reconcile is paused.
+   *
+   * @return the value of {@link #RECONCILE_PAUSED}, false when unset
+   */
+  public boolean reconcilePaused() {
+    return Boolean.parseBoolean(properties.getOrDefault(RECONCILE_PAUSED, "false").trim());
   }
 
   /**

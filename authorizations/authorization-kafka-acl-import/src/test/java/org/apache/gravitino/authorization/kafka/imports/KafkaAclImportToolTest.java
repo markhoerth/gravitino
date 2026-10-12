@@ -18,6 +18,7 @@
  */
 package org.apache.gravitino.authorization.kafka.imports;
 
+import static org.apache.gravitino.authorization.kafka.imports.KafkaAclImportTool.roleName;
 import static org.apache.kafka.common.acl.AclOperation.DESCRIBE;
 import static org.apache.kafka.common.acl.AclOperation.READ;
 import static org.apache.kafka.common.acl.AclOperation.WRITE;
@@ -36,10 +37,14 @@ import java.io.ByteArrayOutputStream;
 import java.io.PrintStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
+import org.apache.gravitino.authorization.Privileges;
 import org.apache.gravitino.authorization.SecurableObject;
+import org.apache.gravitino.authorization.SecurableObjects;
 import org.apache.gravitino.authorization.kafka.KafkaAclProperties;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.DescribeAclsResult;
@@ -61,7 +66,13 @@ public class KafkaAclImportToolTest {
 
   private static final String A = "User:flink.order_enricher";
   private static final String B = "User:flink.billing-v2";
-  private static final List<AclBinding> ACLS =
+  private static final String ROLE_A = roleName("flink.order_enricher");
+  private static final String ROLE_B = roleName("flink.billing-v2");
+  private static final String PAUSE =
+      "setCatalogProperty " + KafkaAclProperties.RECONCILE_PAUSED + "=true";
+  private static final String UNPAUSE =
+      "setCatalogProperty " + KafkaAclProperties.RECONCILE_PAUSED + "=false";
+  private static final List<AclBinding> BASE_ACLS =
       ImmutableList.of(
           topic(A, "order_events", READ, ALLOW),
           topic(A, "order_events", DESCRIBE, ALLOW),
@@ -77,6 +88,7 @@ public class KafkaAclImportToolTest {
           topic("User:alice", "order_events", READ, ALLOW));
 
   @TempDir Path tmp;
+  private final List<AclBinding> acls = new ArrayList<>(BASE_ACLS);
   private FakeImportTarget target;
   private Admin admin;
   private ByteArrayOutputStream out;
@@ -92,7 +104,8 @@ public class KafkaAclImportToolTest {
         .thenAnswer(
             inv -> {
               DescribeAclsResult result = mock(DescribeAclsResult.class);
-              when(result.values()).thenReturn(KafkaFuture.completedFuture(ACLS));
+              when(result.values())
+                  .thenReturn(KafkaFuture.completedFuture(ImmutableList.copyOf(acls)));
               return result;
             });
     out = new ByteArrayOutputStream();
@@ -100,7 +113,7 @@ public class KafkaAclImportToolTest {
 
   @Test
   public void testDryRunMakesNoWrites() throws Exception {
-    KafkaAclImportTool.Outcome outcome = run(false);
+    KafkaAclImportTool.Outcome outcome = run(false, false);
 
     Assertions.assertTrue(outcome.succeeded());
     Assertions.assertEquals(ImmutableList.of(), target.writes);
@@ -126,35 +139,39 @@ public class KafkaAclImportToolTest {
   @Test
   public void testApplyCreatesUsersRolesAndGrants() throws Exception {
     target.users.add("flink.billing-v2");
-    KafkaAclImportTool.Outcome outcome = run(true);
+    KafkaAclImportTool.Outcome outcome = run(true, false);
 
     Assertions.assertTrue(outcome.succeeded(), outcome.report().toString());
     Assertions.assertEquals(
         ImmutableList.of(
-            "createRole kafka_import_flink_billing_v2",
-            "grantRoleToUser kafka_import_flink_billing_v2 flink.billing-v2",
+            PAUSE,
+            "createRole " + ROLE_B,
+            "grantRoleToUser " + ROLE_B + " flink.billing-v2",
             "addUser flink.order_enricher",
-            "createRole kafka_import_flink_order_enricher",
-            "grantRoleToUser kafka_import_flink_order_enricher flink.order_enricher"),
+            "createRole " + ROLE_A,
+            "grantRoleToUser " + ROLE_A + " flink.order_enricher",
+            UNPAUSE,
+            "triggerReconcile"),
         target.writes);
 
-    List<SecurableObject> objects = target.roles.get("kafka_import_flink_order_enricher");
     Assertions.assertEquals(
         ImmutableList.of(
             "CATALOG kafka_catalog [ALLOW USE_CATALOG]",
             "SCHEMA kafka_catalog.default [ALLOW USE_SCHEMA]",
             "TOPIC kafka_catalog.default.order_events [ALLOW CONSUME_TOPIC]",
             "TOPIC kafka_catalog.default.payments [DENY CONSUME_TOPIC]"),
-        describe(objects));
+        describe(target.roles.get(ROLE_A)));
     Assertions.assertEquals(
         ImmutableList.of(
             "CATALOG kafka_catalog [ALLOW USE_CATALOG]",
             "SCHEMA kafka_catalog.default [ALLOW USE_SCHEMA]",
             "TOPIC kafka_catalog.default.invoices [ALLOW PRODUCE_TOPIC]"),
-        describe(target.roles.get("kafka_import_flink_billing_v2")));
+        describe(target.roles.get(ROLE_B)));
 
     JsonNode report = readReport();
     Assertions.assertEquals("OK", report.get("status").asText());
+    Assertions.assertTrue(report.get("unpaused").asBoolean());
+    Assertions.assertEquals("fake", report.get("reconcileTrigger").asText());
     Assertions.assertEquals(0, report.get("missingAfterApply").size());
     for (JsonNode role : report.get("roles")) {
       Assertions.assertEquals("CREATED", role.get("status").asText());
@@ -162,48 +179,154 @@ public class KafkaAclImportToolTest {
   }
 
   @Test
-  public void testExistingRoleSkippedAndReported() throws Exception {
-    target.roles.put("kafka_import_flink_order_enricher", ImmutableList.of());
-    run(true);
+  public void testPauseWrapsEveryUserCall() throws Exception {
+    run(true, false);
 
+    List<String> calls = target.calls;
+    int pause = calls.indexOf(PAUSE);
+    int unpause = calls.indexOf(UNPAUSE);
+    List<Integer> userCalls = new ArrayList<>();
+    for (int i = 0; i < calls.size(); i++) {
+      String c = calls.get(i);
+      if (c.startsWith("userExists")
+          || c.startsWith("addUser")
+          || c.startsWith("roleSecurableObjects")
+          || c.startsWith("createRole")
+          || c.startsWith("grantRoleToUser")) {
+        userCalls.add(i);
+      }
+    }
+    Assertions.assertFalse(userCalls.isEmpty());
+    Assertions.assertTrue(pause >= 0 && pause < userCalls.get(0), calls.toString());
+    Assertions.assertTrue(unpause > userCalls.get(userCalls.size() - 1), calls.toString());
+    Assertions.assertEquals(calls.size() - 1, calls.indexOf("triggerReconcile"), calls.toString());
+    Assertions.assertEquals(
+        "false", target.catalogProperties.get(KafkaAclProperties.RECONCILE_PAUSED));
+  }
+
+  @Test
+  public void testUnpausesWhenTargetCallThrows() throws Exception {
+    target.failOn = "createRole " + ROLE_A;
+    KafkaAclImportTool.Outcome outcome = run(true, false);
+
+    Assertions.assertEquals(1, outcome.exitCode());
+    Assertions.assertEquals(
+        "false", target.catalogProperties.get(KafkaAclProperties.RECONCILE_PAUSED));
+    Assertions.assertTrue(
+        target.calls.indexOf(UNPAUSE) > target.calls.indexOf("createRole " + ROLE_A));
+    Assertions.assertEquals(
+        ImmutableMap.of(ROLE_A, "FAILED", ROLE_B, "CREATED"), roleStatuses(readReport()));
+    Assertions.assertEquals("FAILED", readReport().get("status").asText());
+  }
+
+  @Test
+  public void testUnpausesWhenFirstUserCallThrows() throws Exception {
+    target.failOn = "roleSecurableObjects";
+    KafkaAclImportTool.Outcome outcome = run(true, false);
+
+    Assertions.assertEquals(1, outcome.exitCode());
+    Assertions.assertEquals(ImmutableList.of(PAUSE, UNPAUSE, "triggerReconcile"), target.writes);
+  }
+
+  @Test
+  public void testRefusesUnmappedDenyUnderPrefix() throws Exception {
+    AclBinding hostDeny =
+        new AclBinding(
+            new ResourcePattern(ResourceType.TOPIC, "order_events", PatternType.LITERAL),
+            new AccessControlEntry(A, "10.0.0.7", READ, DENY));
+    acls.add(hostDeny);
+
+    KafkaAclImportTool.Outcome refused = run(true, false);
+    Assertions.assertEquals(2, refused.exitCode());
+    Assertions.assertEquals(ImmutableList.of(), target.writes);
+    Assertions.assertTrue(out.toString(StandardCharsets.UTF_8).contains(hostDeny.toString()));
+    JsonNode report = readReport();
+    Assertions.assertEquals("REFUSED", report.get("status").asText());
+    Assertions.assertEquals(1, report.get("pluginWillDeleteDeny").size());
+
+    KafkaAclImportTool.Outcome accepted = run(true, true);
+    Assertions.assertEquals(0, accepted.exitCode(), accepted.report().toString());
+    Assertions.assertTrue(target.writes.contains("createRole " + ROLE_A));
+  }
+
+  @Test
+  public void testDenyUnderPrefixDoesNotBlockDryRun() throws Exception {
+    acls.add(
+        new AclBinding(
+            new ResourcePattern(ResourceType.TOPIC, "order_", PatternType.PREFIXED),
+            new AccessControlEntry(A, "*", READ, DENY)));
+    Assertions.assertEquals(0, run(false, false).exitCode());
+  }
+
+  @Test
+  public void testExistingRoleGrantedOrSkipped() throws Exception {
+    // Same contents as planned, in a different order: granted.
+    List<SecurableObject> planned =
+        new ArrayList<>(
+            KafkaAclImportTool.securableObjects(
+                "kafka_catalog",
+                KafkaAclImportPlanner.plan(
+                        BASE_ACLS,
+                        new KafkaAclProperties(
+                            ImmutableMap.of(KafkaAclProperties.BOOTSTRAP_SERVERS, "k:9092")),
+                        "analytics",
+                        ImmutableSet.of("order_events", "payments", "invoices"))
+                    .mapped()
+                    .stream()
+                    .filter(g -> g.gravitinoUser().equals("flink.order_enricher"))
+                    .collect(Collectors.toList())));
+    Collections.reverse(planned);
+    target.roles.put(ROLE_A, planned);
+    // Different contents: skipped.
+    SecurableObject catalog =
+        SecurableObjects.ofCatalog(
+            "kafka_catalog", ImmutableList.of(Privileges.UseCatalog.allow()));
+    target.roles.put(ROLE_B, ImmutableList.of(catalog));
+
+    KafkaAclImportTool.Outcome outcome = run(true, false);
+    // ROLE_B is not granted, so B's imported ACL is not regenerated; the fake cluster still holds
+    // it because the fake target does not run the plugin.
+    Assertions.assertEquals(0, outcome.exitCode(), outcome.report().toString());
+    Assertions.assertEquals(
+        ImmutableMap.of(ROLE_A, "ROLE_EXISTS_GRANTED", ROLE_B, "ROLE_EXISTS_DIFFERENT"),
+        roleStatuses(readReport()));
+    Assertions.assertTrue(
+        target.writes.contains("grantRoleToUser " + ROLE_A + " flink.order_enricher"));
+    Assertions.assertFalse(target.writes.stream().anyMatch(w -> w.startsWith("createRole")));
+    Assertions.assertFalse(target.writes.stream().anyMatch(w -> w.contains(ROLE_B)));
+    Assertions.assertEquals(ImmutableList.of(catalog), target.roles.get(ROLE_B));
+  }
+
+  @Test
+  public void testSecondApplyCreatesNothing() throws Exception {
+    run(true, false);
+    List<String> firstWrites = ImmutableList.copyOf(target.writes);
+    target.writes.clear();
+
+    KafkaAclImportTool.Outcome second = run(true, false);
+    Assertions.assertTrue(second.succeeded());
     Assertions.assertEquals(
         ImmutableList.of(
-                "createRole kafka_import_flink_billing_v2",
-                "addUser flink.billing-v2",
-                "grantRoleToUser kafka_import_flink_billing_v2 flink.billing-v2")
-            .stream()
-            .sorted()
-            .collect(Collectors.toList()),
-        target.writes.stream().sorted().collect(Collectors.toList()));
+            PAUSE,
+            "grantRoleToUser " + ROLE_B + " flink.billing-v2",
+            "grantRoleToUser " + ROLE_A + " flink.order_enricher",
+            UNPAUSE,
+            "triggerReconcile"),
+        target.writes);
+    Assertions.assertTrue(firstWrites.contains("createRole " + ROLE_A));
     Assertions.assertEquals(
-        ImmutableList.of(), target.roles.get("kafka_import_flink_order_enricher"));
-    Assertions.assertNull(target.grants.get("flink.order_enricher"));
-    Assertions.assertEquals(
-        ImmutableMap.of(
-            "kafka_import_flink_billing_v2", "CREATED",
-            "kafka_import_flink_order_enricher", "ROLE_EXISTS"),
+        ImmutableMap.of(ROLE_A, "ROLE_EXISTS_GRANTED", ROLE_B, "ROLE_EXISTS_GRANTED"),
         roleStatuses(readReport()));
   }
 
   @Test
-  public void testSecondApplyIsNoOp() throws Exception {
-    run(true);
-    int writes = target.writes.size();
-    Assertions.assertTrue(writes > 0);
-
-    KafkaAclImportTool.Outcome second = run(true);
-    Assertions.assertTrue(second.succeeded());
-    Assertions.assertEquals(writes, target.writes.size(), target.writes.toString());
-    for (String status : roleStatuses(readReport()).values()) {
-      Assertions.assertEquals("ROLE_EXISTS", status);
-    }
-  }
-
-  @Test
   public void testRoleName() {
-    Assertions.assertEquals(
-        "kafka_import_flink_order_enricher", KafkaAclImportTool.roleName("flink.order_enricher"));
-    Assertions.assertEquals("kafka_import_a_b_c_9", KafkaAclImportTool.roleName("a-b@c.9"));
+    Assertions.assertTrue(
+        roleName("flink.order_enricher").matches("kafka_import_flink_order_enricher_[0-9a-f]{8}"));
+    Assertions.assertNotEquals(roleName("a-b"), roleName("a_b"));
+    Assertions.assertTrue(roleName("a-b").startsWith("kafka_import_a_b_"));
+    Assertions.assertTrue(roleName("a_b").startsWith("kafka_import_a_b_"));
+    Assertions.assertEquals(roleName("a-b"), roleName("a-b"));
   }
 
   @Test
@@ -218,7 +341,8 @@ public class KafkaAclImportToolTest {
     Assertions.assertTrue(err.toString(StandardCharsets.UTF_8).contains("--gravitino-uri"));
   }
 
-  private KafkaAclImportTool.Outcome run(boolean apply) throws Exception {
+  private KafkaAclImportTool.Outcome run(boolean apply, boolean acceptDenyRemoval)
+      throws Exception {
     ImportOptions options =
         new ImportOptions(
             "http://unused:8090",
@@ -227,6 +351,7 @@ public class KafkaAclImportToolTest {
             "admin",
             tmp.resolve("kafka.properties"),
             apply,
+            acceptDenyRemoval,
             tmp.resolve("report.json"));
     return KafkaAclImportTool.run(
         options, admin, target, new PrintStream(out, true, StandardCharsets.UTF_8));

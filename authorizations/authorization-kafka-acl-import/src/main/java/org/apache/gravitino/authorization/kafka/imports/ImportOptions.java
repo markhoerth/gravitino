@@ -44,6 +44,13 @@ final class ImportOptions {
           .addOption(Option.builder().longOpt("apply").desc("Write to Gravitino").build())
           .addOption(
               Option.builder()
+                  .longOpt("accept-deny-removal")
+                  .desc(
+                      "Apply even though the plugin will delete unmapped DENY ACLs under the"
+                          + " managed prefix, which widens access")
+                  .build())
+          .addOption(
+              Option.builder()
                   .longOpt("report")
                   .hasArg()
                   .argName("path")
@@ -56,6 +63,7 @@ final class ImportOptions {
   final String user;
   final Path kafkaConfig;
   final boolean apply;
+  final boolean acceptDenyRemoval;
   final Path report;
 
   ImportOptions(
@@ -65,6 +73,7 @@ final class ImportOptions {
       String user,
       Path kafkaConfig,
       boolean apply,
+      boolean acceptDenyRemoval,
       Path report) {
     this.gravitinoUri = gravitinoUri;
     this.metalake = metalake;
@@ -72,6 +81,7 @@ final class ImportOptions {
     this.user = user;
     this.kafkaConfig = kafkaConfig;
     this.apply = apply;
+    this.acceptDenyRemoval = acceptDenyRemoval;
     this.report = report;
   }
 
@@ -84,6 +94,7 @@ final class ImportOptions {
         cmd.getOptionValue("user"),
         Paths.get(cmd.getOptionValue("kafka-config")),
         cmd.hasOption("apply"),
+        cmd.hasOption("accept-deny-removal"),
         Paths.get(cmd.getOptionValue("report", DEFAULT_REPORT)));
   }
 
