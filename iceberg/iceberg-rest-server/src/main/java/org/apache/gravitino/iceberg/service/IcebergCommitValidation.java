@@ -84,10 +84,19 @@ public final class IcebergCommitValidation implements UpdateRequirement {
 
   private final List<MetadataUpdate> updates;
   private final Supplier<FileIO> fileIO;
+  // The commit asserts the current schema id: it evolves the current schema (UpdateSchema), as
+  // opposed to a replace, which Iceberg sends without that requirement.
+  private final boolean evolvesCurrentSchema;
 
   private IcebergCommitValidation(List<MetadataUpdate> updates, Supplier<FileIO> fileIO) {
+    this(updates, fileIO, false);
+  }
+
+  private IcebergCommitValidation(
+      List<MetadataUpdate> updates, Supplier<FileIO> fileIO, boolean evolvesCurrentSchema) {
     this.updates = updates;
     this.fileIO = fileIO;
+    this.evolvesCurrentSchema = evolvesCurrentSchema;
   }
 
   /**
@@ -127,7 +136,11 @@ public final class IcebergCommitValidation implements UpdateRequirement {
       }
     }
     if (!create) {
-      requirements.add(new IcebergCommitValidation(request.updates(), fileIO));
+      boolean evolvesCurrentSchema =
+          request.requirements().stream()
+              .anyMatch(UpdateRequirement.AssertCurrentSchemaID.class::isInstance);
+      requirements.add(
+          new IcebergCommitValidation(request.updates(), fileIO, evolvesCurrentSchema));
     }
     return new UpdateTableRequest(requirements.build(), request.updates());
   }
@@ -360,8 +373,12 @@ public final class IcebergCommitValidation implements UpdateRequirement {
    * An added schema must keep the data already written readable: a field id that exists in the
    * current schema keeps its kind, may only change type by an allowed promotion and cannot go from
    * optional to required, a field id not in the current schema must be new (above last-column-id)
-   * or identical to the field that had the id before, and a new required field needs a default. A
-   * replace (which removes main) starts from no data, so only the id rule applies to it.
+   * or identical to the field that had the id before, and a new required field needs a default. The
+   * rules apply when the table has data, and also on an empty table when the commit evolves the
+   * current schema (it asserts the current schema id, as Iceberg's UpdateSchema does), so the IRC
+   * refuses the same changes as the Gravitino API and Iceberg's own schema API whether or not data
+   * was written yet. A replace (which removes main, or on an empty table carries no current-schema
+   * assertion) builds a new schema, so only the id rule applies to it.
    */
   private void checkSchemas(TableMetadata base, TableMetadata updated) {
     boolean replacesTable =
@@ -374,6 +391,7 @@ public final class IcebergCommitValidation implements UpdateRequirement {
             && (updated.currentSnapshot() == null
                 || base.snapshot(updated.currentSnapshot().snapshotId()) == null);
     boolean hasData = !base.snapshots().isEmpty();
+    boolean checkEvolution = (hasData && !replacesTable) || evolvesCurrentSchema;
     Map<Integer, Types.NestedField> current = TypeUtil.indexById(base.schema().asStruct());
     for (MetadataUpdate update : updates) {
       if (!(update instanceof MetadataUpdate.AddSchema)) {
@@ -383,8 +401,8 @@ public final class IcebergCommitValidation implements UpdateRequirement {
       for (Types.NestedField field : TypeUtil.indexById(schema.asStruct()).values()) {
         Types.NestedField existing = current.get(field.fieldId());
         if (existing == null) {
-          checkNewField(base, field, hasData && !replacesTable);
-        } else if (hasData && !replacesTable) {
+          checkNewField(base, field, checkEvolution);
+        } else if (checkEvolution) {
           checkTypeChange(existing, field, updated.formatVersion());
           checkNullabilityChange(existing, field);
         }

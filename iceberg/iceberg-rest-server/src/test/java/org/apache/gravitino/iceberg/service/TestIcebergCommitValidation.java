@@ -344,6 +344,89 @@ public class TestIcebergCommitValidation {
   }
 
   @Test
+  public void testSchemaEvolutionRulesApplyToEmptyTables() {
+    // An empty table: no snapshot yet. A commit that evolves the current schema (it asserts the
+    // current schema id, as Iceberg's UpdateSchema does) follows the same rules as on a table with
+    // data, matching the Gravitino API and Iceberg's own schema API.
+    TableIdentifier ident = TableIdentifier.of(Namespace.of("db"), "empty_evolve");
+    catalog.createTable(
+        ident,
+        new Schema(
+            Types.NestedField.optional(1, "l", Types.LongType.get()),
+            Types.NestedField.optional(2, "i", Types.IntegerType.get()),
+            Types.NestedField.optional(3, "d", Types.DecimalType.of(10, 2)),
+            Types.NestedField.optional(4, "s", Types.StringType.get())),
+        PartitionSpec.unpartitioned(),
+        ImmutableMap.of("format-version", "3"));
+    String l = "{\"id\":1,\"name\":\"l\",\"required\":false,\"type\":\"long\"}";
+    String i = "{\"id\":2,\"name\":\"i\",\"required\":false,\"type\":\"int\"}";
+    String d = "{\"id\":3,\"name\":\"d\",\"required\":false,\"type\":\"decimal(10, 2)\"}";
+    String s = "{\"id\":4,\"name\":\"s\",\"required\":false,\"type\":\"string\"}";
+
+    // Refused: a narrowing type change, a change across types, a decimal scale change, optional to
+    // required, and a new required field without a default.
+    for (String fields :
+        new String[] {
+          l.replace("long", "int") + "," + i + "," + d + "," + s,
+          l + "," + i + "," + d + "," + s.replace("string", "int"),
+          l + "," + i + "," + d.replace("10, 2", "10, 3") + "," + s,
+          l + "," + i + "," + d + "," + s.replace("\"required\":false", "\"required\":true"),
+          l
+              + ","
+              + i
+              + ","
+              + d
+              + ","
+              + s
+              + ",{\"id\":5,\"name\":\"r\",\"required\":true,\"type\":\"string\"}"
+        }) {
+      Assertions.assertThrows(
+          ValidationException.class,
+          () -> CatalogHandlers.updateTable(catalog, ident, evolve(ident, fields)),
+          fields);
+    }
+    Assertions.assertEquals(1, catalog.loadTable(ident).schemas().size());
+
+    // Allowed: a legal promotion.
+    CatalogHandlers.updateTable(
+        catalog, ident, evolve(ident, l + "," + i.replace("int", "long") + "," + d + "," + s));
+    Assertions.assertEquals(Types.LongType.get(), catalog.loadTable(ident).schema().findType("i"));
+  }
+
+  @Test
+  public void testReplaceOfEmptyTableMayChangeColumnTypes() {
+    // A replace (CREATE OR REPLACE) of an empty table carries no current-schema assertion and
+    // builds
+    // a new schema; it keeps field ids by name, so a column may change type.
+    TableIdentifier ident = TableIdentifier.of(Namespace.of("db"), "empty_replace");
+    catalog.createTable(
+        ident,
+        new Schema(Types.NestedField.optional(1, "c", Types.LongType.get())),
+        PartitionSpec.unpartitioned(),
+        ImmutableMap.of("format-version", "2"));
+    UpdateTableRequest replace =
+        IcebergCommitValidation.withValidation(
+            new UpdateTableRequest(
+                ImmutableList.of(
+                    new UpdateRequirement.AssertTableUUID(
+                        catalog.loadTable(ident).uuid().toString())),
+                ImmutableList.of(
+                    addSchema("{\"id\":1,\"name\":\"c\",\"required\":true,\"type\":\"string\"}"),
+                    new MetadataUpdate.SetCurrentSchema(-1))));
+    CatalogHandlers.updateTable(catalog, ident, replace);
+    Assertions.assertEquals(
+        Types.StringType.get(), catalog.loadTable(ident).schema().findType("c"));
+  }
+
+  private UpdateTableRequest evolve(TableIdentifier ident, String fields) {
+    int schemaId = catalog.loadTable(ident).schema().schemaId();
+    return IcebergCommitValidation.withValidation(
+        new UpdateTableRequest(
+            ImmutableList.of(new UpdateRequirement.AssertCurrentSchemaID(schemaId)),
+            ImmutableList.of(addSchema(fields), new MetadataUpdate.SetCurrentSchema(-1))));
+  }
+
+  @Test
   public void testDecimalChangesFollowPromotionRules() {
     commit(
         addSchema(
