@@ -22,7 +22,7 @@
 # directly. Nothing in the demo talks to Elasticsearch through Gravitino.
 #
 #   ./demo-es-pushdown.sh setup     build, start the server, create the metalake and catalog
-#   ./demo-es-pushdown.sh demo      run the six demo steps, pausing between each
+#   ./demo-es-pushdown.sh demo      run the ten demo steps, pausing between each
 #   ./demo-es-pushdown.sh teardown  stop the server and remove what the demo created
 #
 # Environment:
@@ -118,9 +118,6 @@ setup() {
     exit 1
   fi
   ok "license: $license"
-  if [[ "$license" == "basic" ]]; then
-    note "Index privileges will work. Row filters and field restrictions will not."
-  fi
 
   banner "Creating demo indices"
   for index in "${INDEX_PREFIX}claims" "${INDEX_PREFIX}members" "${INDEX_PREFIX}pii"; do

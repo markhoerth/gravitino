@@ -22,7 +22,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -31,7 +30,6 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
-import org.apache.commons.lang3.StringUtils;
 import org.apache.gravitino.MetadataObject;
 import org.apache.gravitino.authorization.Privilege;
 import org.apache.gravitino.authorization.Role;
@@ -46,29 +44,11 @@ import org.slf4j.LoggerFactory;
  * hierarchy is flattened into index names and patterns. Elasticsearch privileges are also purely
  * additive, so a Gravitino deny is realised by expanding the pattern it sits under into an explicit
  * list of the indices that remain allowed.
- *
- * <p>Row filters and column restrictions are read from role properties in this prototype:
- *
- * <ul>
- *   <li>{@code elasticsearch.dls.<index>} holds a Query DSL object applied as document-level
- *       security, and {@code elasticsearch.dls.*} applies to every index in the role.
- *   <li>{@code elasticsearch.fls.<index>} holds a comma-separated list of fields to hide, and
- *       {@code elasticsearch.fls.*} applies to every index in the role.
- * </ul>
  */
 public class ElasticsearchRoleTranslator {
 
   private static final Logger LOG = LoggerFactory.getLogger(ElasticsearchRoleTranslator.class);
   private static final ObjectMapper MAPPER = new ObjectMapper();
-
-  /** Role property prefix carrying a document-level security query. */
-  public static final String DLS_PROPERTY_PREFIX = "elasticsearch.dls.";
-
-  /** Role property prefix carrying the fields hidden by field-level security. */
-  public static final String FLS_PROPERTY_PREFIX = "elasticsearch.fls.";
-
-  /** Property key suffix that applies a restriction to every index in the role. */
-  public static final String ALL_INDICES = "*";
 
   private final String indexPrefix;
   private final Supplier<List<String>> indexLister;
@@ -181,7 +161,7 @@ public class ElasticsearchRoleTranslator {
     ObjectNode descriptor = MAPPER.createObjectNode();
     descriptor.putArray("cluster");
     ArrayNode indices = descriptor.putArray("indices");
-    resolved.forEach((names, privileges) -> indices.add(indexEntry(names, privileges, role)));
+    resolved.forEach((names, privileges) -> indices.add(indexEntry(names, privileges)));
 
     ObjectNode metadata = descriptor.putObject("metadata");
     metadata.put("managed_by", "gravitino");
@@ -269,68 +249,12 @@ public class ElasticsearchRoleTranslator {
     return resolved;
   }
 
-  private ObjectNode indexEntry(String names, Set<String> privileges, Role role) {
+  private ObjectNode indexEntry(String names, Set<String> privileges) {
     ObjectNode entry = MAPPER.createObjectNode();
     entry.putArray("names").add(names);
     ArrayNode privilegeArray = entry.putArray("privileges");
     privileges.forEach(privilegeArray::add);
-
-    boolean readsDocuments = privileges.stream().anyMatch(ElasticsearchPrivileges::isReadPrivilege);
-    if (!readsDocuments) {
-      return entry;
-    }
-
-    Map<String, String> properties =
-        role.properties() == null ? java.util.Collections.emptyMap() : role.properties();
-
-    String dls =
-        firstNonBlank(
-            properties.get(DLS_PROPERTY_PREFIX + names),
-            properties.get(DLS_PROPERTY_PREFIX + ALL_INDICES));
-    if (StringUtils.isNotBlank(dls)) {
-      try {
-        entry.set("query", MAPPER.readTree(dls));
-      } catch (Exception e) {
-        throw new IllegalArgumentException(
-            "Role "
-                + role.name()
-                + " carries a document-level security query for "
-                + names
-                + " that is not valid JSON: "
-                + dls,
-            e);
-      }
-    }
-
-    String fls =
-        firstNonBlank(
-            properties.get(FLS_PROPERTY_PREFIX + names),
-            properties.get(FLS_PROPERTY_PREFIX + ALL_INDICES));
-    if (StringUtils.isNotBlank(fls)) {
-      ObjectNode fieldSecurity = entry.putObject("field_security");
-      fieldSecurity.putArray("grant").add("*");
-      ArrayNode except = fieldSecurity.putArray("except");
-      Arrays.stream(fls.split(","))
-          .map(String::trim)
-          .filter(StringUtils::isNotBlank)
-          .forEach(except::add);
-    }
-
-    if ((StringUtils.isNotBlank(dls) || StringUtils.isNotBlank(fls))
-        && privileges.contains(ElasticsearchPrivileges.WRITE)) {
-      throw new IllegalArgumentException(
-          "Role "
-              + role.name()
-              + " carries both write access and a row or column restriction on "
-              + names
-              + ". Elasticsearch restricts document updates on indices under document- or "
-              + "field-level security, so the two cannot be combined in one role.");
-    }
     return entry;
-  }
-
-  private static String firstNonBlank(String first, String second) {
-    return StringUtils.isNotBlank(first) ? first : second;
   }
 
   private static boolean isPattern(String value) {

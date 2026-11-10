@@ -104,15 +104,4 @@ public final class ElasticsearchPrivileges {
   public static boolean isSupported(Privilege.Name name) {
     return MAPPING.containsKey(name);
   }
-
-  /**
-   * Returns whether an Elasticsearch index privilege reads document contents. Row and column
-   * restrictions only apply to reads, so a role carrying them must not also carry write access.
-   *
-   * @param privilege the Elasticsearch index privilege.
-   * @return true when the privilege reads documents.
-   */
-  public static boolean isReadPrivilege(String privilege) {
-    return READ.equals(privilege);
-  }
 }

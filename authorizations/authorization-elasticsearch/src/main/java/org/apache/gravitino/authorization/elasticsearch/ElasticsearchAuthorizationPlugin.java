@@ -94,7 +94,7 @@ public class ElasticsearchAuthorizationPlugin implements AuthorizationPlugin {
         new ElasticsearchRoleTranslator(
             properties.indexPrefix(), client::listIndices, properties.requireUsagePrivileges());
 
-    warnOnLicense(client.licenseType());
+    logLicense(client.licenseType());
 
     long interval = properties.reconcileIntervalSeconds();
     if (interval > 0) {
@@ -540,15 +540,8 @@ public class ElasticsearchAuthorizationPlugin implements AuthorizationPlugin {
     }
   }
 
-  private void warnOnLicense(String licenseType) {
-    if ("basic".equals(licenseType)) {
-      LOG.warn(
-          "The Elasticsearch cluster reports a basic license. Index privileges are enforced, but "
-              + "document-level and field-level security are not available, so row filters and "
-              + "column restrictions in Gravitino roles will be rejected when applied.");
-    } else {
-      LOG.info("The Elasticsearch cluster reports license type {}", licenseType);
-    }
+  private void logLicense(String licenseType) {
+    LOG.info("The Elasticsearch cluster reports license type {}", licenseType);
   }
 
   /**

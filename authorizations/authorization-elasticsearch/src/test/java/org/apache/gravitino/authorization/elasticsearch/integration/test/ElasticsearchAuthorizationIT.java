@@ -47,7 +47,6 @@ import org.apache.gravitino.authorization.SecurableObjects;
 import org.apache.gravitino.authorization.User;
 import org.apache.gravitino.authorization.elasticsearch.ElasticsearchAuthorizationPlugin;
 import org.apache.gravitino.authorization.elasticsearch.ElasticsearchAuthorizationProperties;
-import org.apache.gravitino.authorization.elasticsearch.ElasticsearchRoleTranslator;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
@@ -64,7 +63,6 @@ import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
  *   -e discovery.type=single-node -e xpack.security.enabled=true \
  *   -e xpack.security.http.ssl.enabled=false -e ELASTIC_PASSWORD=smoketest1 \
  *   docker.elastic.co/elasticsearch/elasticsearch:8.15.0
- * curl -u elastic:smoketest1 -X POST "http://localhost:9200/_license/start_trial?acknowledge=true"
  *
  * ES_URL=http://localhost:9200 ES_USER=elastic ES_PASSWORD=smoketest1 \
  *   ./gradlew :authorizations:authorization-elasticsearch:test --tests "*ElasticsearchAuthorizationIT"
@@ -78,14 +76,11 @@ public class ElasticsearchAuthorizationIT {
   private static final String CLAIMS = "it_claims";
   private static final String PII = "it_pii";
   private static final String REFERENCE = "it_reference";
-  private static final String NATIVE_USER = "gravitino_it_user";
-  private static final String NATIVE_PASSWORD = "gravitino_it_password_1";
 
   private static String esUrl;
   private static String adminAuth;
   private static HttpClient httpClient;
   private static ElasticsearchAuthorizationPlugin plugin;
-  private static boolean paidTier;
 
   @BeforeAll
   public static void setUp() throws Exception {
@@ -97,9 +92,6 @@ public class ElasticsearchAuthorizationIT {
             + Base64.getEncoder()
                 .encodeToString((user + ":" + password).getBytes(StandardCharsets.UTF_8));
     httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
-
-    JsonNode license = MAPPER.readTree(admin("GET", "/_license", null));
-    paidTier = !"basic".equals(license.path("license").path("type").asText());
 
     createIndex(CLAIMS, "{\"region\":{\"type\":\"keyword\"},\"ssn\":{\"type\":\"keyword\"}}");
     createIndex(PII, "{\"ssn\":{\"type\":\"keyword\"}}");
@@ -125,14 +117,10 @@ public class ElasticsearchAuthorizationIT {
     if (plugin != null) {
       plugin.close();
     }
-    silently("DELETE", "/_security/user/" + NATIVE_USER);
     silently("DELETE", "/" + CLAIMS);
     silently("DELETE", "/" + PII);
     silently("DELETE", "/" + REFERENCE);
-    for (String role : new String[] {"reader", "restricted", "regional"}) {
-      silently("DELETE", "/_security/role/gravitino_it_" + role);
-      silently("DELETE", "/_security/role_mapping/gravitino_it_" + role + "__mapping");
-    }
+    resetRole("reader");
   }
 
   @Test
@@ -172,46 +160,6 @@ public class ElasticsearchAuthorizationIT {
     assertTrue(names.contains(REFERENCE));
     assertFalse(names.contains(PII));
     assertFalse(names.contains("it_*"));
-  }
-
-  @Test
-  public void testFieldRestrictionIsEnforcedForARealQuery() throws Exception {
-    resetRole("restricted");
-    if (!paidTier) {
-      return;
-    }
-    Role role =
-        role(
-            "restricted",
-            ImmutableList.of(catalogSelect()),
-            ImmutableMap.of(ElasticsearchRoleTranslator.FLS_PROPERTY_PREFIX + "*", "ssn"));
-    plugin.onRoleCreated(role);
-    createNativeUser("gravitino_it_restricted");
-
-    String result = asNativeUser("/" + CLAIMS + "/_search");
-    assertTrue(result.contains("region"));
-    assertFalse(result.contains("\"ssn\""));
-  }
-
-  @Test
-  public void testRowFilterIsEnforcedForARealQuery() throws Exception {
-    resetRole("regional");
-    if (!paidTier) {
-      return;
-    }
-    Role role =
-        role(
-            "regional",
-            ImmutableList.of(catalogSelect()),
-            ImmutableMap.of(
-                ElasticsearchRoleTranslator.DLS_PROPERTY_PREFIX + "*",
-                "{\"term\":{\"region\":\"west\"}}"));
-    plugin.onRoleCreated(role);
-    createNativeUser("gravitino_it_regional");
-
-    String result = asNativeUser("/" + CLAIMS + "/_search");
-    assertTrue(result.contains("west"));
-    assertFalse(result.contains("east"));
   }
 
   @Test
@@ -260,27 +208,6 @@ public class ElasticsearchAuthorizationIT {
   private static void createIndex(String name, String properties) throws Exception {
     silently("DELETE", "/" + name);
     admin("PUT", "/" + name, "{\"mappings\":{\"properties\":" + properties + "}}");
-  }
-
-  private static void createNativeUser(String esRole) throws Exception {
-    admin(
-        "PUT",
-        "/_security/user/" + NATIVE_USER,
-        "{\"password\":\"" + NATIVE_PASSWORD + "\",\"roles\":[\"" + esRole + "\"]}");
-  }
-
-  private static String asNativeUser(String path) throws Exception {
-    String credentials =
-        Base64.getEncoder()
-            .encodeToString((NATIVE_USER + ":" + NATIVE_PASSWORD).getBytes(StandardCharsets.UTF_8));
-    HttpRequest request =
-        HttpRequest.newBuilder()
-            .uri(URI.create(esUrl + path))
-            .header("Authorization", "Basic " + credentials)
-            .header("Content-Type", "application/json")
-            .GET()
-            .build();
-    return httpClient.send(request, HttpResponse.BodyHandlers.ofString()).body();
   }
 
   private static JsonNode fetch(String path) throws Exception {

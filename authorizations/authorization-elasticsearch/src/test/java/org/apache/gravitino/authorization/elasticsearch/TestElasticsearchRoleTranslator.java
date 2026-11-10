@@ -20,7 +20,6 @@ package org.apache.gravitino.authorization.elasticsearch;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -117,56 +116,6 @@ public class TestElasticsearchRoleTranslator {
   }
 
   @Test
-  public void testFieldRestrictionBecomesFieldSecurityExcept() {
-    SecurableObject catalog =
-        SecurableObjects.ofCatalog("es", ImmutableList.of(Privileges.SelectTable.allow()));
-    Role role =
-        role(
-            "masked",
-            ImmutableList.of(catalog),
-            ImmutableMap.of(
-                ElasticsearchRoleTranslator.FLS_PROPERTY_PREFIX + "*", "ssn, member.dob"));
-
-    JsonNode entry = translator.translate(role, "prod").get("indices").get(0);
-    JsonNode except = entry.get("field_security").get("except");
-
-    assertEquals(2, except.size());
-    assertEquals("ssn", except.get(0).asText());
-    assertEquals("member.dob", except.get(1).asText());
-  }
-
-  @Test
-  public void testRowFilterBecomesDocumentLevelSecurityQuery() {
-    SecurableObject catalog =
-        SecurableObjects.ofCatalog("es", ImmutableList.of(Privileges.SelectTable.allow()));
-    Role role =
-        role(
-            "regional",
-            ImmutableList.of(catalog),
-            ImmutableMap.of(
-                ElasticsearchRoleTranslator.DLS_PROPERTY_PREFIX + "*",
-                "{\"term\":{\"region\":\"{{_user.metadata.region}}\"}}"));
-
-    JsonNode entry = translator.translate(role, "prod").get("indices").get(0);
-    assertEquals(
-        "{{_user.metadata.region}}", entry.get("query").get("term").get("region").asText());
-  }
-
-  @Test
-  public void testWriteWithRestrictionIsRejected() {
-    SecurableObject catalog =
-        SecurableObjects.ofCatalog(
-            "es", ImmutableList.of(Privileges.SelectTable.allow(), Privileges.ModifyTable.allow()));
-    Role role =
-        role(
-            "writer",
-            ImmutableList.of(catalog),
-            ImmutableMap.of(ElasticsearchRoleTranslator.FLS_PROPERTY_PREFIX + "*", "ssn"));
-
-    assertThrows(IllegalArgumentException.class, () -> translator.translate(role, "prod"));
-  }
-
-  @Test
   public void testUnsupportedPrivilegeIsSkipped() {
     SecurableObject catalog =
         SecurableObjects.ofCatalog("es", ImmutableList.of(Privileges.CreateRole.allow()));
@@ -237,11 +186,6 @@ public class TestElasticsearchRoleTranslator {
   }
 
   private static Role role(String name, List<SecurableObject> objects) {
-    return role(name, objects, ImmutableMap.of());
-  }
-
-  private static Role role(
-      String name, List<SecurableObject> objects, Map<String, String> properties) {
     return new Role() {
       @Override
       public String name() {
@@ -250,7 +194,7 @@ public class TestElasticsearchRoleTranslator {
 
       @Override
       public Map<String, String> properties() {
-        return properties;
+        return ImmutableMap.of();
       }
 
       @Override

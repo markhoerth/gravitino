@@ -1,3 +1,22 @@
+<!--
+  Licensed to the Apache Software Foundation (ASF) under one
+  or more contributor license agreements.  See the NOTICE file
+  distributed with this work for additional information
+  regarding copyright ownership.  The ASF licenses this file
+  to you under the Apache License, Version 2.0 (the
+  "License"); you may not use this file except in compliance
+  with the License.  You may obtain a copy of the License at
+
+   http://www.apache.org/licenses/LICENSE-2.0
+
+  Unless required by applicable law or agreed to in writing,
+  software distributed under the License is distributed on an
+  "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+  KIND, either express or implied.  See the License for the
+  specific language governing permissions and limitations
+  under the License.
+-->
+
 # Elasticsearch authorization plugin
 
 Pushes Gravitino roles and grants into the Elasticsearch security model, so that clients querying
@@ -57,22 +76,13 @@ back from the cluster before each rewrite, so plugin state does not have to surv
 Elasticsearch stores no users in this model: identity and group membership arrive in the token the
 caller presents, which means a group change made only inside Gravitino never reaches the cluster.
 
-## Row filters and column restrictions
+## Scope
 
-The plugin SPI carries no tag or policy events, so this prototype reads them from role properties:
+The plugin pushes down privileges only: index patterns, exact index names, read and write
+privileges, role mappings, and deny expansion. Generated index privileges carry only `names` and
+`privileges`, which every Elastic license tier enforces, `basic` included.
 
-| Property | Effect |
-| --- | --- |
-| `elasticsearch.dls.<index>` | Query DSL object applied as document-level security |
-| `elasticsearch.dls.*` | The same, for every index in the role |
-| `elasticsearch.fls.<index>` | Comma-separated fields, applied as `field_security.except` |
-| `elasticsearch.fls.*` | The same, for every index in the role |
-
-Document-level security queries may template on the caller, for example
-`{"term":{"region":"{{_user.metadata.region}}"}}`, which lets one role serve every region.
-
-Both require a paid Elastic tier. The plugin logs a warning at startup when the cluster reports a
-basic license, and the role descriptors carrying restrictions will be rejected by the cluster.
+Row-filter and column-mask pushdown from Gravitino policies is not yet implemented.
 
 ## Users and identity
 
@@ -131,34 +141,25 @@ Two places where the plugin is stricter than Gravitino, both erring toward less 
 
 ## Known limits
 
-- **Field restrictions hide rather than mask.** Elasticsearch removes the field entirely. Partial
-  reveal or hashing needs a masked copy of the field written at ingest and granted in its place.
 - **Deny is realised by expansion.** Elasticsearch roles are additive, so a deny under an allowed
   pattern replaces that pattern with the indices that remain allowed. Indices created afterwards
   stay out of the role until the next reconciliation pass.
-- **Roles union.** A user holding an unrestricted role beside a restricted one on the same index
-  sees everything. No governed user may hold a role, built-in roles included, that touches a
-  governed index without its restrictions.
-- **Restrictions are read-only.** Elasticsearch restricts document updates on indices under
-  document- or field-level security, so the translator rejects a role that carries both write access
-  and a restriction.
+- **Roles union.** Elasticsearch grants the union of every role a user holds, so a role assigned
+  outside Gravitino, built-in roles included, can widen what a governed user reaches.
 - **Hand edits are reverted, not prevented.** A cluster superuser can edit a `gravitino_*` role. The
   reconciliation pass puts it back.
 
 ## Verifying against a live cluster
 
-`dev/es-authz-smoke.sh` writes the role shapes the translator emits to a real cluster, maps a native
-test user onto them, and queries as that user. It reports the license tier, skips the paid-tier
-checks on basic, and cleans up after itself.
+`dev/demo-es-pushdown.sh` drives the plugin through the Gravitino REST API and reads each effect
+back from Elasticsearch: role creation, grants to a user and a group, a deny, a privilege change and
+revokes. `dev/verify-identity.sh` checks the JWT and native realm identity paths, and
+`dev/verify-late-user.sh` checks a grant made before the Elasticsearch account exists.
 
 ```
-ES_URL=https://localhost:9200 ES_USER=elastic ES_PASSWORD=... \
-  ./authorizations/authorization-elasticsearch/dev/es-authz-smoke.sh
+./authorizations/authorization-elasticsearch/dev/demo-es-pushdown.sh setup
+NO_PAUSE=1 ./authorizations/authorization-elasticsearch/dev/demo-es-pushdown.sh demo
 ```
-
-The last case is deliberately a demonstration rather than a check of the plugin: it shows a second
-unrestricted role defeating a row filter, which is the composition trap the plugin has to avoid when
-roles are assigned.
 
 ## Building and testing
 
